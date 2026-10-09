@@ -20,9 +20,9 @@ title=${2:-pve-ct-autoupdate}
 message=${3:-}
 
 case $severity in
-    error)   priority=high;   tags=warning_triangle ;;
+    error)   priority=high;   tags=rotating_light ;;
     warning) priority=medium; tags=warning ;;
-    *)       priority=low;    tags=check_mark_button ;;
+    *)       priority=low;    tags=white_check_mark ;;
 esac
 
 curl -s -f \
