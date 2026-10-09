@@ -16,8 +16,9 @@ config. Everything else is skipped silently — no snapshot, no stop, no wipe.
 > (`mp0: local-zfs:subvol-<CTID>-disk-1,mp=/root`).
 
 ## Config example using Proxmox CT Notes:
-
 ![screenshot](docs/screenshot.png)
+
+Syntax inspired by Podman Quadlets
 
 ## Requirements
 
