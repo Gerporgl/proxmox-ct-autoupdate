@@ -41,7 +41,9 @@ LICENSE, .gitignore       (poc/ ignored)
 ## 4. Config block grammar (strict)
 
 In `<ctid>.conf`, only lines starting with `#` are considered; a leading `#` and one
-optional space is stripped before matching.
+optional space is stripped before matching. The intended authoring path is the Proxmox
+UI *Summary* field, where the user types the fenced block without any `#` and PVE
+writes the `#` prefixes itself.
 
 ```
 #```

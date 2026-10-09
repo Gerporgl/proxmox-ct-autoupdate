@@ -48,19 +48,41 @@ install -m 0755 pve-ct-autoupdate.sh /usr/local/bin/pve-ct-autoupdate.sh
 
 ## Opt-in container config
 
-Add this at the top of `/etc/pve/lxc/<CTID>.conf` (see `examples/ct-conf.example`):
+### Recommended: the Proxmox UI *Summary* field
+
+Container → **Summary** tab. Type the block normally, **without any `#`** — Proxmox
+stores the summary as comment lines and prefixes them itself:
+
+````md
+```
+AutoUpdate=registry
+Image=registry.example.com/org/app:latest
+```
+````
+
+This shows up in `/etc/pve/lxc/<CTID>.conf` as:
 
 ```
 #```
 #AutoUpdate=registry
-#Image=registry.example.com/org/app%3Alatest
+#Image=registry.example.com/org/app:latest
 #```
 ```
 
+The summary keeps working as before: any other text, notes or markdown you put there
+is simply ignored, only the fenced block is parsed. No SSH needed — opt in for a
+container entirely from the web UI.
+
+### Or: edit the config file directly
+
+Add the same block (with the `#` prefixes) at the top of `/etc/pve/lxc/<CTID>.conf`,
+or use `pvesh set -f /nodes/<node>/<qemu|lxc>/<ctid>` — see `examples/ct-conf.example`.
+
 Parsing is strict:
 
-- only lines starting with `#` are considered, the fenced block must be complete
-  (exactly one opening and one closing ``` fence, ```` ```md ```` also accepted)
+- only lines starting with `#` are considered (that is what Proxmox writes for the
+  summary), the fenced block must be complete (exactly one opening and one closing
+  ``` fence, ```` ```md ```` also accepted)
 - `AutoUpdate` must be exactly `registry` — anything else disables the container
 - `Image` is required, the **tag is mandatory** (`app` is rejected, `app:latest` is fine)
 - `%3A` style URL encoding of `:` is decoded, an optional `docker://` prefix is accepted

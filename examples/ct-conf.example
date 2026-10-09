@@ -1,8 +1,16 @@
 # Opt-in block for a Proxmox container config (/etc/pve/lxc/<CTID>.conf).
 #
-# Put it at the very top of the config. Every line must start with '#',
-# the block must be fenced by exactly a pair of ``` lines (```md also works).
-# Edit through the Proxmox UI summary field or directly on the file.
+# Easiest way: container -> Summary tab in the Proxmox UI, and type it WITHOUT the
+# '#' characters:
+#
+#     ```
+#     AutoUpdate=registry
+#     Image=registry.example.com/org/app:latest
+#     ```
+#
+# Proxmox stores the summary as comment lines, which is the form shown below.
+# Every line must start with '#', the block must be fenced by exactly a pair of
+# ``` lines (```md also works). Other summary text is ignored.
 
 #```
 #AutoUpdate=registry
