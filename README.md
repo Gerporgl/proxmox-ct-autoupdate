@@ -58,10 +58,10 @@ install -m 0755 pve-ct-autoupdate.sh /usr/local/bin/pve-ct-autoupdate.sh
 
 ## Opt-in container config
 
-### Recommended: the Proxmox UI *Summary* field
+### Recommended: the Proxmox UI *Notes* field
 
-Container → **Summary** tab. Type the block normally, **without any `#`** — Proxmox
-stores the summary as comment lines and prefixes them itself:
+Container → **Notes** tab. Type the block normally, **without any `#`** — Proxmox
+stores the notes as comment lines and prefixes them itself:
 
 ````md
 ```
@@ -79,7 +79,7 @@ This shows up in `/etc/pve/lxc/<CTID>.conf` as:
 #```
 ```
 
-The summary keeps working as before: any other text, notes or markdown you put there
+The notes keeps working as before: any other text, notes or markdown you put there
 is simply ignored, only the fenced block is parsed. No SSH needed — opt in for a
 container entirely from the web UI.
 
@@ -91,7 +91,7 @@ or use `pvesh set -f /nodes/<node>/<qemu|lxc>/<ctid>` — see `examples/ct-conf.
 Parsing is strict:
 
 - only lines starting with `#` are considered (that is what Proxmox writes for the
-  summary), the fenced block must be complete (exactly one opening and one closing
+  notes), the fenced block must be complete (exactly one opening and one closing
   ``` fence, ```` ```md ```` also accepted)
 - `AutoUpdate` must be exactly `registry` — anything else disables the container
 - `Image` is required, the **tag is mandatory** (`app` is rejected, `app:latest` is fine)
