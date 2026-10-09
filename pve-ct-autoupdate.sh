@@ -14,6 +14,8 @@
 # Anything without a valid block is skipped silently. ZFS-backed rootfs only.
 # See README.md for the full configuration reference.
 #
+# Copyright (c) 2026 Gerporgl — MIT licensed, see LICENSE.
+#
 
 set -euo pipefail
 
