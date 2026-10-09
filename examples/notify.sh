@@ -20,8 +20,8 @@ title=${2:-pve-ct-autoupdate}
 message=${3:-}
 
 case $severity in
-    error)   priority=high;   tags=rotating_light ;;
-    warning) priority=medium; tags=warning ;;
+    error)   priority=max;   tags=rotating_light ;;
+    warning) priority=high;   tags=warning ;;
     *)       priority=low;    tags=white_check_mark ;;
 esac
 
