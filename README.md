@@ -15,6 +15,10 @@ config. Everything else is skipped silently — no snapshot, no stop, no wipe.
 > in through the UI). Mount a second volume for anything that must survive
 > (`mp0: local-zfs:subvol-<CTID>-disk-1,mp=/root`).
 
+## Config example using Proxmox CT Notes:
+
+![screenshot](docs/screenshot.png)
+
 ## Requirements
 
 Proxmox VE 9 (Debian 13) on ZFS, plus:
