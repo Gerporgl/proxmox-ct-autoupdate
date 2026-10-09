@@ -37,6 +37,19 @@ Tests are mock based (no PVE/ZFS/registry in the sandbox) and run as non-root vi
 `PVE_AUTOUPDATE_ALLOW_NON_ROOT=1`. Never hardcode hostnames, registries, ntfy URLs or real
 CTIDs in tracked files — fixtures use `registry.example.com`, `ct 200/100`.
 
+## Commit and push etiquette
+
+- **After finishing a task, confirm with the user before committing and before pushing.**
+  Do not treat "make it work" as permission to publish. Only act on an explicit request or
+  an explicit standing authorization given for that session.
+- Commit with the **repo's configured git identity** — plain `git commit`, never
+  `git -c user.name=…`. Do not invent a fake identity for a public repo; GitHub renders an
+  unknown email as an unlinked name.
+- Run `./tests/run-tests.sh` (green) and `bash -n pve-ct-autoupdate.sh` before any commit.
+- Never amend, rebase or force-push `main`, and never rewrite published history, without
+  explicit approval; use `--force-with-lease` when rewriting is authorized.
+- Commit messages: no personal hosts, registries, ntfy topics or real CTIDs.
+
 ## Gotchas already paid for (do not relearn them)
 
 - **`/etc/pve/storage.cfg` stanza headers carry a colon**: `zfspool: local-zfs`, not
