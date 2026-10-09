@@ -9,6 +9,11 @@ config. Everything else is skipped silently — no snapshot, no stop, no wipe.
 > The update is destructive by design: the container rootfs is wiped and replaced
 > by the image content. A ZFS snapshot is taken first and rolled back automatically
 > on failure.
+>
+> **Everything under the container rootfs is ephemeral** — including credentials Proxmox
+> itself created for you (`pct create --password`, `--root-password`, SSH keys you pushed
+> in through the UI). Mount a second volume for anything that must survive
+> (`mp0: local-zfs:subvol-<CTID>-disk-1,mp=/root`).
 
 ## Requirements
 
@@ -206,10 +211,18 @@ with `SnapshotKeep`, privileged vs unprivileged id mapping, `--dry-run` and
 ## Limitations
 
 - ZFS backed rootfs only.
-- The rootfs is fully **ephemeral by design**: any file you add inside the container
-  rootfs (a shell profile, `~/.ssh/authorized_keys`, local config, …) is deleted on the
-  next update. Keep persistent state on an extra mount (`mpN: local-zfs:subvol-<ctid>-disk-1,mp=/data`)
-  or bake it into the image.
+- The rootfs is fully **ephemeral by design**: any file inside it (shell profile,
+  `~/.ssh/authorized_keys`, local config, …) is deleted on the next update — **including
+  the root password and SSH keys Proxmox wrote when the container was created**, since
+  those live in `/etc/shadow` and `/root/.ssh` on the rootfs. Only the `mpN:` extra
+  mounts survive. Bake what matters into the image, or mount a dedicated subvolume:
+
+  ```
+  mp0: local-zfs:subvol-100-disk-1,mp=/data,backup=1,size=64G
+  ```
+
+  Prefer images that re-create their own defaults when the mounted directory is empty,
+  so the container is usable again right after an update.
 - Snapshot-based rollback only covers the rootfs dataset: extra `mpN:` mounts are
   deliberately never touched, so data there is **not** rolled back.
 - Registry authentication uses whatever `skopeo auth.json` provides; there is no
