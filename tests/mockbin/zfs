@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Fake zfs(8) used by the test suite. Emulates only what pve-ct-autoupdate.sh uses.
+#
+# MOCK_ZFS_DB lines:  name <TAB> type <TAB> mountpoint <TAB> mounted
+sub=$1; shift
+echo "zfs $sub $*" >> "$MOCK_CALLS"
+
+db=$MOCK_ZFS_DB
+snaps=$MOCK_ZFS_SNAPS
+
+out_fields=""; type=""; recursive=""; depth=""; target=""; force=0
+positional=()
+args=("$@"); i=0
+while (( i < ${#args[@]} )); do
+    case ${args[i]} in
+        -o) out_fields=${args[i+1]}; i=$((i+2)) ;;
+        -t) type=${args[i+1]}; i=$((i+2)) ;;
+        -r) recursive=${args[i+1]}; i=$((i+2)) ;;
+        -d) depth=${args[i+1]}; i=$((i+2)) ;;
+        -s) i=$((i+2)) ;;
+        -H) i=$((i+1)) ;;
+        -f) force=1; i=$((i+1)) ;;
+        *)  positional+=("${args[i]}"); i=$((i+1)) ;;
+    esac
+done
+target=${positional[0]:-}
+
+case $sub in
+    list)
+        if [[ $type == snapshot ]]; then
+            [[ -f $snaps ]] && grep "^${target}@" "$snaps" || true
+            exit 0
+        fi
+        if [[ -n $recursive ]]; then
+            awk -F '\t' -v r="$recursive" -v want="$out_fields" '
+                ($1 == r || index($1, r "/") == 1) && $2 == "filesystem" {
+                    if (want == "name,mountpoint") printf "%s\t%s\n", $1, $3
+                    else print $1
+                }' "$db"
+            exit 0
+        fi
+        if [[ $out_fields == name && $depth == 0 ]]; then
+            # resolve a path to the dataset mounted exactly there
+            awk -F '\t' -v p="$target" '$3 == p { print $1; exit }' "$db"
+            exit 0
+        fi
+        if [[ $out_fields == type ]]; then
+            awk -F '\t' -v d="$target" '$1 == d { print $2; exit }' "$db"
+            exit 0
+        fi
+        exit 0
+        ;;
+    get)
+        prop=${positional[0]:-}; ds=${positional[1]:-}
+        case $prop in
+            mountpoint) awk -F '\t' -v d="$ds" '$1 == d { print $3; exit }' "$db" ;;
+            mounted)    awk -F '\t' -v d="$ds" '$1 == d { print $4; exit }' "$db" ;;
+            *) printf -- '-\n' ;;
+        esac
+        exit 0
+        ;;
+    snapshot)
+        target=${positional[0]:-}
+        printf '%s\n' "$target" >> "$snaps"
+        exit 0
+        ;;
+    destroy)
+        target=${positional[0]:-}
+        if [[ -f $snaps ]]; then
+            grep -v -x "$target" "$snaps" > "$snaps.tmp" || true
+            mv "$snaps.tmp" "$snaps"
+        fi
+        exit 0
+        ;;
+    rollback)
+        target=${positional[0]:-}
+        [[ $force == 1 ]] || exit 1
+        printf '%s\n' "$target" >> "$MOCK_ROLLBACKS"
+        exit 0
+        ;;
+esac
+exit 0

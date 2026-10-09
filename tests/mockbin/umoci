@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Fake umoci(1) — only "raw unpack" is used.
+echo "umoci $*" >> "$MOCK_CALLS"
+if [[ ${MOCK_UMOCI_FAIL:-0} == 1 ]]; then exit 1; fi
+
+path=""
+args=("$@"); i=0
+while (( i < ${#args[@]} )); do
+    case ${args[i]} in
+        --image|--uid-map|--gid-map) i=$((i+2)) ;;
+        --*) i=$((i+1)) ;;
+        raw|unpack) i=$((i+1)) ;;
+        *) [[ -d ${args[i]} ]] && path=${args[i]}; i=$((i+1)) ;;
+    esac
+done
+
+if [[ -z $path ]]; then
+    echo "fake umoci: no target directory found in: $*" >&2
+    exit 1
+fi
+printf 'fake rootfs\n' > "$path/.autoupdate-unpacked"
+exit 0

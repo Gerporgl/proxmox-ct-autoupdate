@@ -1,0 +1,12 @@
+# Local proofs of concept / personal experiments, never published.
+poc/
+
+# Test scratch space
+tests/tmp/
+*.tmp
+
+# Local overrides / editor cruft
+.env
+*.log
+*.swp
+.DS_Store

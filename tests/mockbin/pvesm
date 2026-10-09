@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake pvesm(1) — only "path" is used.
+sub=$1; volid=$2
+echo "pvesm $sub $volid" >> "$MOCK_CALLS"
+if [[ $sub == path ]]; then
+    awk -F '\t' -v v="$volid" '$1 == v { print $2; exit }' "$MOCK_PVESM"
+fi
+exit 0

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake skopeo(1).
+sub=$1
+echo "skopeo $*" >> "$MOCK_CALLS"
+
+case $sub in
+    inspect)
+        [[ ${MOCK_SKOPEO_INSPECT_FAIL:-0} == 1 ]] && exit 1
+        printf '%s\n' "${MOCK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+        ;;
+    copy)
+        [[ ${MOCK_SKOPEO_COPY_FAIL:-0} == 1 ]] && exit 1
+        # last argument looks like oci:/path:tag
+        local_ref=${*: -1}
+        dir=${local_ref#oci:}; dir=${dir%:*}
+        mkdir -p "$dir" && printf 'fake layers\n' > "$dir/manifest.json"
+        ;;
+esac
+exit 0

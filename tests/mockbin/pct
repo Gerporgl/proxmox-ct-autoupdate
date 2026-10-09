@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fake pct(1).
+sub=$1; ctid=$2
+echo "pct $sub $ctid" >> "$MOCK_CALLS"
+
+status_of() { awk -F '\t' -v c="$ctid" '$1 == c { print $2; exit }' "$MOCK_PCT"; }
+set_status() {
+    awk -F '\t' -v c="$ctid" -v s="$1" 'BEGIN{found=0} $1 == c { print c "\t" s; found=1; next } { print } END { if (!found) print c "\t" s }' \
+        "$MOCK_PCT" > "$MOCK_PCT.tmp" && mv "$MOCK_PCT.tmp" "$MOCK_PCT"
+}
+
+case $sub in
+    status) echo "status: $(status_of)" ;;
+    stop)
+        if [[ ${MOCK_PCT_STOP_FAIL:-0} == 1 ]]; then exit 1; fi
+        if [[ $(status_of) == stopped ]]; then
+            # real pct errors out when the container is already stopped
+            echo "container already stopped" >&2
+            exit 1
+        fi
+        set_status stopped
+        ;;
+    start)
+        if [[ ${MOCK_PCT_START_FAIL:-0} == 1 ]]; then exit 1; fi
+        set_status running
+        ;;
+esac
+exit 0

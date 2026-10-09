@@ -1,0 +1,12 @@
+# /etc/cron.d/pve-ct-autoupdate
+#
+# Standard Debian crontab entry for Proxmox. Runs daily at 03:15.
+# Output goes to root's mail (or drop the redirect into a log file).
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+15 3 * * * root /usr/local/bin/pve-ct-autoupdate.sh >> /var/log/pve-ct-autoupdate.log 2>&1
+
+# Hourly variant:
+#0 * * * * root /usr/local/bin/pve-ct-autoupdate.sh >> /var/log/pve-ct-autoupdate.log 2>&1

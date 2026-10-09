@@ -1,0 +1,30 @@
+# Opt-in block for a Proxmox container config (/etc/pve/lxc/<CTID>.conf).
+#
+# Put it at the very top of the config. Every line must start with '#',
+# the block must be fenced by exactly a pair of ``` lines (```md also works).
+# Edit through the Proxmox UI summary field or directly on the file.
+
+#```
+#AutoUpdate=registry
+#Image=registry.example.com/org/app%3Alatest
+#```
+
+# %3A is the URL encoded form of ':' — both forms work:
+#   #Image=registry.example.com/org/app:latest
+#
+# The tag is mandatory (no tag => the container is skipped).
+#
+# Optional keys (inside the block):
+#   SnapshotKeep=0      keep N past snapshots for this container
+#
+# Unknown keys are ignored. AutoUpdate must be exactly "registry".
+
+arch: amd64
+cores: 4
+hostname: ctauto-demo
+memory: 4096
+net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+ostype: ubuntu
+rootfs: local-zfs:subvol-100-disk-0,size=16G
+swap: 0
+unprivileged: 1
