@@ -206,6 +206,10 @@ with `SnapshotKeep`, privileged vs unprivileged id mapping, `--dry-run` and
 ## Limitations
 
 - ZFS backed rootfs only.
+- The rootfs is fully **ephemeral by design**: any file you add inside the container
+  rootfs (a shell profile, `~/.ssh/authorized_keys`, local config, …) is deleted on the
+  next update. Keep persistent state on an extra mount (`mpN: local-zfs:subvol-<ctid>-disk-1,mp=/data`)
+  or bake it into the image.
 - Snapshot-based rollback only covers the rootfs dataset: extra `mpN:` mounts are
   deliberately never touched, so data there is **not** rolled back.
 - Registry authentication uses whatever `skopeo auth.json` provides; there is no
