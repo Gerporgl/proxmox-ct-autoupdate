@@ -319,6 +319,7 @@ parse_storage_cfg() {
     awk -v store="$store" '
         /^[^[:space:]#]/ {
             n = split($0, a, /[[:space:]]+/)
+            sub(/:$/, "", a[1])          # PVE writes "zfspool: local-zfs"
             if (n >= 2 && a[2] == store && (a[1] == "zfspool" || a[1] == "zfs")) {
                 type = a[1]; found = 1
             } else {
@@ -331,6 +332,7 @@ parse_storage_cfg() {
             line = $0
             sub(/^[[:space:]]+/, "", line)
             split(line, b, /[[:space:]]+/)
+            sub(/:$/, "", b[1])          # tolerate "pool: rpool/data"
             if      (b[1] == "pool")       pool = b[2]
             else if (b[1] == "mountpoint") mountpoint = b[2]
             else if (b[1] == "content")    content = b[2]
@@ -344,31 +346,36 @@ parse_storage_cfg() {
 }
 
 CT_STORE="" CT_STORAGE_TYPE="" CT_POOL="" CT_STORAGE_MOUNTPOINT=""
-CT_DS="" CT_ROOTFS_PATH=""
+CT_DS="" CT_ROOTFS_PATH="" RESOLVE_REASON=""
 
 resolve_rootfs() {
     local ctid=$1 vol=$2 store=$3
 
     CT_DS="" CT_ROOTFS_PATH="" CT_STORAGE_TYPE="" CT_POOL="" CT_STORAGE_MOUNTPOINT=""
+    RESOLVE_REASON=""
 
     if [[ $vol != "subvol-${ctid}-disk-"* ]]; then
-        log_debug "ct $ctid: rootfs volume '$vol' is not a subvol of this container"
+        RESOLVE_REASON="rootfs volume '$vol' is not a subvol of ct $ctid"
+        log_debug "ct $ctid: $RESOLVE_REASON"
         return 1
     fi
 
     local parsed
     if ! parsed=$(parse_storage_cfg "$store"); then
-        log_debug "ct $ctid: storage '$store' not found in $STORAGE_CFG"
+        RESOLVE_REASON="storage '$store' not found in $STORAGE_CFG"
+        log_debug "ct $ctid: $RESOLVE_REASON"
         return 1
     fi
     IFS='|' read -r CT_STORAGE_TYPE CT_POOL CT_STORAGE_MOUNTPOINT _disabled _content <<<"$parsed"
 
     if [[ $CT_STORAGE_TYPE != zfspool && $CT_STORAGE_TYPE != zfs ]]; then
-        log_debug "ct $ctid: storage '$store' is type '${CT_STORAGE_TYPE:-?}', only ZFS is supported"
+        RESOLVE_REASON="storage '$store' is type '${CT_STORAGE_TYPE:-unknown}', only ZFS (zfspool) is supported"
+        log_debug "ct $ctid: $RESOLVE_REASON"
         return 1
     fi
-    [[ -n $CT_POOL ]] || { log_warn "ct $ctid: storage '$store' has no pool"; return 1; }
-    [[ $_disabled == 1 ]] && { log_warn "ct $ctid: storage '$store' is disabled"; return 1; }
+    [[ -n $CT_POOL ]] || { RESOLVE_REASON="storage '$store' has no 'pool' setting"; log_warn "ct $ctid: $RESOLVE_REASON"; return 1; }
+    [[ $_disabled == 1 ]] && { RESOLVE_REASON="storage '$store' is disabled"; log_warn "ct $ctid: $RESOLVE_REASON"; return 1; }
+    log_debug "ct $ctid: storage '$store' type=$CT_STORAGE_TYPE pool=$CT_POOL mountpoint=${CT_STORAGE_MOUNTPOINT:-auto}"
 
     # Ask ZFS which dataset actually holds this volume. Layout is version
     # dependent (<pool>/subvol-... or legacy <pool>/data/subvol-...), so never
@@ -384,7 +391,8 @@ resolve_rootfs() {
     done < <(zfs list -H -o name,mountpoint -t filesystem -r "$CT_POOL" 2>/dev/null || true)
 
     if [[ -z $CT_DS ]]; then
-        log_debug "ct $ctid: no ZFS dataset named '$vol' under pool '$CT_POOL' (not on this node?)"
+        RESOLVE_REASON="no ZFS filesystem dataset named '$vol' under pool '$CT_POOL' (another node? imported?)"
+        log_debug "ct $ctid: $RESOLVE_REASON"
         return 1
     fi
 
@@ -392,7 +400,8 @@ resolve_rootfs() {
         CT_ROOTFS_PATH=$(zfs get -H -o value mountpoint "$CT_DS" 2>/dev/null || true)
     fi
     if [[ -z $CT_ROOTFS_PATH || $CT_ROOTFS_PATH == "-" || $CT_ROOTFS_PATH == legacy ]]; then
-        log_warn "ct $ctid: cannot determine a mountpoint for dataset '$CT_DS'"
+        RESOLVE_REASON="dataset '$CT_DS' has no usable mountpoint"
+        log_warn "ct $ctid: $RESOLVE_REASON"
         return 1
     fi
 
@@ -402,7 +411,8 @@ resolve_rootfs() {
         local pvepath
         if pvepath=$(pvesm path "$store:$vol" 2>/dev/null) && [[ -n $pvepath ]]; then
             if [[ $(realpath "$pvepath" 2>/dev/null || printf '%s' "$pvepath") != $(realpath "$CT_ROOTFS_PATH" 2>/dev/null || printf '%s' "$CT_ROOTFS_PATH") ]]; then
-                log_warn "ct $ctid: pvesm reports '$pvepath' but ZFS reports '$CT_ROOTFS_PATH' for '$CT_DS'"
+                RESOLVE_REASON="pvesm reports '$pvepath' but ZFS reports '$CT_ROOTFS_PATH' for '$CT_DS'"
+                log_warn "ct $ctid: $RESOLVE_REASON"
                 return 1
             fi
         fi
@@ -546,6 +556,7 @@ process_container() {
     [[ -n $CFG_KEEP ]] && keep=$CFG_KEEP
 
     if ! resolve_rootfs "$ctid" "$CFG_ROOTFS_VOL" "$CFG_ROOTFS_STORE"; then
+        printf 'ct %-6s image=%s  -> NOT RESOLVED: %s\n' "$ctid" "$image" "${RESOLVE_REASON:-unknown reason}"
         log_info "ct $ctid: opted in but its ZFS rootfs could not be resolved safely, skipping"
         return 0
     fi

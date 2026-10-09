@@ -145,6 +145,36 @@ EOF
 
 ROOTFS=""
 
+# case using the exact syntax PVE writes in /etc/pve/storage.cfg
+case_real_storage_cfg_syntax() {
+    test_start "real PVE storage.cfg syntax (zfspool: id, pool <pool>/data)"
+    setup
+    ROOTFS=$T/rpool/data/subvol-200-disk-0
+    storage_write <<'EOF'
+dir: local
+        path /var/lib/vz
+        content backup,vztmpl,iso
+
+zfspool: local-zfs
+        pool rpool/data
+        content rootdir,images
+        sparse 1
+
+cifs: nas-backups
+        server 192.0.2.10
+        content backup
+EOF
+    zfs_add rpool/data filesystem "$T/rpool/data" yes
+    zfs_add rpool/data/subvol-200-disk-0 filesystem "$ROOTFS" yes
+    pvesm_add local-zfs:subvol-200-disk-0 "$ROOTFS"
+    valid_block_conf
+    run_script --list
+    check "storage parsed as zfspool" grep -F -q "store=local-zfs pool=rpool/data" "$OUT_FILE"
+    check "dataset resolved" grep -F -q "dataset=rpool/data/subvol-200-disk-0" "$OUT_FILE"
+    check "rootfs resolved" grep -F -q "rootfs=$ROOTFS" "$OUT_FILE"
+    teardown
+}
+
 # add a second container (ct 100) to the fake pool/config
 extra_ct100() {
     conf_write 100 <<EOF
@@ -532,7 +562,7 @@ EOF
 for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
           case_invalid_mode case_unclosed_fence case_key_outside_block \
           case_unknown_key_ignored case_tag_required case_non_zfs_storage \
-          case_legacy_data_layout case_mountpoint_mismatch case_foreign_ct \
+          case_legacy_data_layout case_real_storage_cfg_syntax case_mountpoint_mismatch case_foreign_ct \
           case_umoci_failure_rolls_back case_stop_failure case_pull_failure \
           case_snapshot_keep case_pvesm_only_and_stopped_ct case_list_mode \
           case_ctid_filter case_privileged_no_map; do
