@@ -656,10 +656,12 @@ process_container() {
         return 0
     fi
 
-    local -a umoci_args=(raw unpack --image "$oci:autoupdate" --keep-dirlinks "$path")
+    # umoci expects every option before the <rootfs> positional argument.
+    local -a umoci_args=(raw unpack --image "$oci:autoupdate" --keep-dirlinks)
     if [[ $CFG_UNPRIVILEGED == 1 ]]; then
         umoci_args+=(--uid-map "$IDMAP" --gid-map "$IDMAP")
     fi
+    umoci_args+=("$path")
     if ! run_cmd umoci "${umoci_args[@]}"; then
         rollback_container "$ctid" "$ds" "$snap" "$was_running" "umoci unpack failed"
         cleanup_oci "$ctid"

@@ -223,6 +223,7 @@ case_update_success() {
     check "exit 0" test "$RC" -eq 0
     check "old file gone (rootfs wiped)" bash -c "! test -e '$ROOTFS/old-file.txt'"
     check "unpacked marker"   test -f "$ROOTFS/.autoupdate-unpacked"
+    check "rootfs is umoci's last argument" bash -c "grep 'umoci raw unpack' '$MOCK_CALLS' | awk '{if (\$NF != \"$ROOTFS\") exit 1}'"
     check "container restarted" calls_has "pct start 200"
     check "snapshot created"  calls_has "zfs snapshot rpool/subvol-200-disk-0@autoupdate-"
     check "snapshot pruned (keep=0)" snapshot_count 0
