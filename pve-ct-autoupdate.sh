@@ -41,6 +41,7 @@ IDMAP=${PVE_AUTOUPDATE_IDMAP:-0:100000:65536}
 
 DRY_RUN=${PVE_AUTOUPDATE_DRY_RUN:-0}
 VERBOSE=${PVE_AUTOUPDATE_VERBOSE:-0}
+LOG_TIMESTAMPS=${PVE_AUTOUPDATE_LOG_TIMESTAMPS:-0}
 FORCE=0
 ABORT=0
 declare -a ONLY_CTID=()
@@ -51,13 +52,21 @@ declare -a ONLY_CTID=()
 
 _ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-log_debug() {
-    [[ $VERBOSE == 1 ]] && printf '%s [debug] %s\n' "$(_ts)" "$*" >&2
+# Log prefix: empty by default, "YYYY-MM-DD HH:MM:SS " with --log-timestamps.
+_log_prefix() {
+    if [[ $LOG_TIMESTAMPS == 1 ]]; then
+        printf '%s ' "$(_ts)"
+    fi
     return 0
 }
-log_info() { printf '%s [info ] %s\n' "$(_ts)" "$*" >&2; }
-log_warn() { printf '%s [warn ] %s\n' "$(_ts)" "$*" >&2; }
-log_error() { printf '%s [error] %s\n' "$(_ts)" "$*" >&2; }
+
+log_debug() {
+    [[ $VERBOSE == 1 ]] && printf '%s[debug] %s\n' "$(_log_prefix)" "$*" >&2
+    return 0
+}
+log_info() { printf '%s[info ] %s\n' "$(_log_prefix)" "$*" >&2; }
+log_warn() { printf '%s[warn ] %s\n' "$(_log_prefix)" "$*" >&2; }
+log_error() { printf '%s[error] %s\n' "$(_log_prefix)" "$*" >&2; }
 
 # Notification hook, optional. Contract: notify.sh <severity> <title> <message>
 # severity is one of: info | warning | error
@@ -99,7 +108,7 @@ die() { log_error "$*"; exit 1; }
 
 run_cmd() {
     if [[ $DRY_RUN == 1 ]]; then
-        printf '%s [dry-run] %s\n' "$(_ts)" "$*"
+        printf '%s[dry-run] %s\n' "$(_log_prefix)" "$*"
         return 0
     fi
     "$@"
@@ -132,6 +141,8 @@ Usage: $PROG [options]
   --ctid <id>        Only consider this container id (repeatable).
   --force            Apply the update even if the digest did not change.
   --verbose          Extra debug logging.
+  --log-timestamps   Prefix every log line with a YYYY-MM-DD HH:MM:SS timestamp
+                     (also for --dry-run output). Off by default.
   --state-dir DIR    Default: /var/lib/pve-ct-autoupdate
   --oci-dir DIR      Default: <state-dir>/oci
   --snapshot-keep N  Keep N past autoupdate snapshots per container (0 = remove
@@ -144,7 +155,7 @@ Environment:
   PVE_AUTOUPDATE_DIGEST_DIR, PVE_AUTOUPDATE_OCI_DIR, PVE_AUTOUPDATE_LOCK_DIR,
   PVE_AUTOUPDATE_SNAPSHOT_KEEP, PVE_AUTOUPDATE_SNAPSHOT_PREFIX,
   PVE_AUTOUPDATE_IDMAP, PVE_AUTOUPDATE_NOTIFY_CMD, PVE_AUTOUPDATE_VERBOSE,
-  PVE_AUTOUPDATE_DRY_RUN
+  PVE_AUTOUPDATE_LOG_TIMESTAMPS, PVE_AUTOUPDATE_DRY_RUN
 EOF
 }
 
@@ -159,6 +170,7 @@ while (($#)); do
         --ctid) [[ $# -ge 2 ]] || die "--ctid needs an argument"; ONLY_CTID+=("$2"); shift ;;
         --force) FORCE=1 ;;
         --verbose) VERBOSE=1 ;;
+        --log-timestamps) LOG_TIMESTAMPS=1 ;;
         --state-dir) [[ $# -ge 2 ]] || die "--state-dir needs an argument"; STATE_DIR=$2; DIGEST_DIR=$STATE_DIR/digest; OCI_DIR=$STATE_DIR/oci; shift ;;
         --oci-dir) [[ $# -ge 2 ]] || die "--oci-dir needs an argument"; OCI_DIR=$2; shift ;;
         --snapshot-keep) [[ $# -ge 2 ]] || die "--snapshot-keep needs an argument"; SNAPSHOT_KEEP=$2; shift ;;

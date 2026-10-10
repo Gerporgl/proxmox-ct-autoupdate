@@ -95,6 +95,8 @@ notify_hasnt()   { ! grep -F -q "$1" "$MOCK_NOTIFY"; }
 file_has()       { grep -F -q "$2" "$1"; }
 rolled_back()    { grep -F -q "$1" "$MOCK_ROLLBACKS"; }
 count_lines() { local n; n=$(grep -c "$1" "$2" 2>/dev/null) || n=0; printf '%s' "${n:-0}"; }
+has_ts()   { grep -E -q '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ' "$1"; }
+hasnt_ts() { ! grep -E -q '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} ' "$1"; }
 rollback_count() { [[ $(count_lines . "$MOCK_ROLLBACKS") == "$1" ]]; }
 snapshot_count() { [[ $(count_lines "@autoupdate-" "$MOCK_ZFS_SNAPS") == "$1" ]]; }
 digest_of()      { cat "$PVE_AUTOUPDATE_STATE_DIR/digest/$1.digest" 2>/dev/null; }
@@ -540,6 +542,36 @@ case_ctid_filter() {
     teardown
 }
 
+case_log_timestamps() {
+    test_start "log timestamps are opt-in (default: no timestamps)"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    run_script --dry-run
+    check "dry-run output has no timestamp" hasnt_ts "$OUT_FILE"
+    check "log output has no timestamp"     hasnt_ts "$ERR_FILE"
+    check "log level column kept"          grep -F -q "[info ] ct 200:" "$ERR_FILE"
+    teardown
+
+    test_start "--log-timestamps prefixes log and dry-run output"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    run_script --dry-run --log-timestamps
+    check "exit 0" test "$RC" -eq 0
+    check "dry-run output timestamped" grep -E -q '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \[dry-run\] ' "$OUT_FILE"
+    check "log output timestamped"     has_ts "$ERR_FILE"
+    teardown
+
+    test_start "PVE_AUTOUPDATE_LOG_TIMESTAMPS=1 works without the flag"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    PVE_AUTOUPDATE_LOG_TIMESTAMPS=1 run_script --dry-run
+    check "env var enables timestamps" has_ts "$OUT_FILE"
+    teardown
+}
+
 case_privileged_no_map() {
     test_start "privileged containers get no uid/gid map"
     setup
@@ -566,7 +598,7 @@ for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
           case_legacy_data_layout case_real_storage_cfg_syntax case_mountpoint_mismatch case_foreign_ct \
           case_umoci_failure_rolls_back case_stop_failure case_pull_failure \
           case_snapshot_keep case_pvesm_only_and_stopped_ct case_list_mode \
-          case_ctid_filter case_privileged_no_map; do
+          case_ctid_filter case_privileged_no_map case_log_timestamps; do
     MOCK_DIGEST_DEFAULT=sha256:aaaa1111
     "$fn"
 done

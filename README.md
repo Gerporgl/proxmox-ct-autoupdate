@@ -143,6 +143,7 @@ are skipped quietly.
 --ctid <id>        limit the run to this CTID (repeatable)
 --force            apply the update even when the digest did not change
 --verbose          debug logging
+--log-timestamps   prefix every log line with a date/time (off by default)
 --state-dir DIR    default /var/lib/pve-ct-autoupdate
 --oci-dir DIR      default <state-dir>/oci
 --snapshot-keep N  default 0 (remove the temporary snapshot after success)
@@ -163,7 +164,7 @@ Environment overrides:
 | `PVE_AUTOUPDATE_SNAPSHOT_PREFIX` | `autoupdate` (ZFS snapshot names are limited to 32 chars) |
 | `PVE_AUTOUPDATE_IDMAP` | `0:100000:65536` |
 | `PVE_AUTOUPDATE_NOTIFY_CMD` | auto-detected hook (see below) |
-| `PVE_AUTOUPDATE_VERBOSE`, `PVE_AUTOUPDATE_DRY_RUN` | `0` |
+| `PVE_AUTOUPDATE_VERBOSE`, `PVE_AUTOUPDATE_LOG_TIMESTAMPS`, `PVE_AUTOUPDATE_DRY_RUN` | `0` |
 
 The state dir holds only the last applied digest per CTID
 (`<state-dir>/digest/<ctid>.digest`). The OCI staging dir lives on real disk

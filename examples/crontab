@@ -10,3 +10,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Hourly variant:
 #0 * * * * root /usr/local/bin/pve-ct-autoupdate.sh >> /var/log/pve-ct-autoupdate.log 2>&1
+
+# Log lines have no timestamp by default; add --log-timestamps when the output
+# goes to a plain log file instead of the syslog/journal wrapper:
+#15 3 * * * root /usr/local/bin/pve-ct-autoupdate.sh --log-timestamps >> /var/log/pve-ct-autoupdate.log 2>&1
