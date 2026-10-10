@@ -58,6 +58,7 @@ teardown() {
     [[ -n $T ]] && rm -rf "$T"
     T=""
     unset MOCK_UMOCI_FAIL MOCK_PCT_STOP_FAIL MOCK_SKOPEO_COPY_FAIL MOCK_SKOPEO_INSPECT_FAIL MOCK_DIGEST
+    unset MOCK_VERSION MOCK_CREATED MOCK_LABEL_CREATED MOCK_SOURCE MOCK_REVISION MOCK_SKOPEO_META_FAIL
 }
 
 zfs_add() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$MOCK_ZFS_DB"; mkdir -p "$3"; }
@@ -100,6 +101,11 @@ hasnt_ts() { ! grep -E -q '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2
 rollback_count() { [[ $(count_lines . "$MOCK_ROLLBACKS") == "$1" ]]; }
 snapshot_count() { [[ $(count_lines "@autoupdate-" "$MOCK_ZFS_SNAPS") == "$1" ]]; }
 digest_of()      { cat "$PVE_AUTOUPDATE_STATE_DIR/digest/$1.digest" 2>/dev/null; }
+meta_has()       { grep -F -q "$2" "$PVE_AUTOUPDATE_STATE_DIR/digest/$1.meta"; }
+seed_meta() { # seed_meta <ctid> <key=value lines...>
+    mkdir -p "$PVE_AUTOUPDATE_STATE_DIR/digest"
+    printf '%s\n' "${@:2}" > "$PVE_AUTOUPDATE_STATE_DIR/digest/$1.meta"
+}
 
 test_start() { CURRENT=$1; printf '\n== %s\n' "$1"; }
 
@@ -211,7 +217,7 @@ case_dry_run() {
     check "plans snapshot"      grep -F -q "zfs snapshot rpool/subvol-200-disk-0@autoupdate-" "$OUT_FILE"
     check "no digest committed"      test -z "$(digest_of 200)"
     check "rootfs untouched"         test -f "$ROOTFS/keepme.txt"
-    check "notification is marked [dry-run]" notify_has "[dry-run] LXC 200 updated"
+    check "notification is marked [dry-run]" notify_has "[dry-run] ctauto-demo (LXC 200) updated"
     teardown
 }
 
@@ -231,7 +237,7 @@ case_update_success() {
     check "snapshot pruned (keep=0)" snapshot_count 0
     check "digest stored"     test "$(digest_of 200)" = "$MOCK_DIGEST"
     check "no rollback happened" rollback_count 0
-    check "notified about update" notify_has "LXC 200 updated"
+    check "notified about update" notify_has "ctauto-demo (LXC 200) updated"
     teardown
 }
 
@@ -477,7 +483,8 @@ case_pull_failure() {
     check "no digest for 200" test -z "$(digest_of 200)"
     check "oci staging cleaned" bash -c "[ -z \"\$(ls -A '$PVE_AUTOUPDATE_STATE_DIR/oci/ct-200' 2>/dev/null)\" ]"
     check "next container still processed" calls_has "skopeo copy docker://registry.example.com/org/second:latest"
-    check "error notified" notify_has "LXC 200 update failed"
+    check "error notified" notify_has "ctauto-demo (LXC 200) update failed"
+    check "failure body names the container" notify_has "Container  ctauto-demo (LXC 200)"
     teardown
 }
 
@@ -591,6 +598,114 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
+# Notifications
+# ----------------------------------------------------------------------------
+
+case_notification_metadata() {
+    test_start "notification carries hostname, version, build date and source"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    export MOCK_VERSION=1.2.3 MOCK_LABEL_CREATED=2026-02-01T12:00:00Z
+    export MOCK_SOURCE=https://github.com/example/app MOCK_REVISION=deadbeefcafe12345678
+    export MOCK_DIGEST=sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222cccc
+    run_script
+    check "title uses the hostname"    notify_has "ctauto-demo (LXC 200) → 1.2.3"
+    check "body names the container"   notify_has "Container  ctauto-demo (LXC 200)"
+    check "body carries the image"     notify_has "Image      registry.example.com/org/app:latest"
+    check "digest is truncated"        notify_has "Digest     sha256:aaaa1111bbbb…"
+    check "body carries the version"   notify_has "Version    1.2.3"
+    check "body carries the build date" notify_has "Built      2026-02-01T12:00:00Z"
+    check "body carries the source"    notify_has "Source     https://github.com/example/app"
+    check "no Revision line"          notify_hasnt "Revision"
+    check "metadata stored for the next run" meta_has 200 "version=1.2.3"
+    check "digest still stored"        test "$(digest_of 200)" = "$MOCK_DIGEST"
+    teardown
+}
+
+case_notification_version_change() {
+    test_start "version change is reported as old -> new"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    seed_meta 200 "image=registry.example.com/org/app:latest" "digest=sha256:oldold00" \
+        "version=1.0.0" "created=2026-01-01T00:00:00Z" "source=https://example.com/app" "revision=aaaa111111111111"
+    printf 'sha256:oldold00\n' > "$PVE_AUTOUPDATE_STATE_DIR/digest/200.digest"
+    export MOCK_VERSION=2.0.0 MOCK_LABEL_CREATED=2026-02-01T12:00:00Z MOCK_REVISION=bbbb222222222222
+    export MOCK_DIGEST=sha256:bbbb222222222222222222222222222222222222222222222222222222222222
+    run_script
+    check "title shows the version jump" notify_has "ctauto-demo (LXC 200): 1.0.0 → 2.0.0"
+    check "body shows old -> new version" notify_has "1.0.0 → 2.0.0"
+    check "body shows old -> new digest"  notify_has "sha256:oldold00 → sha256:bbbb22222222…"
+    check "new metadata stored"          meta_has 200 "version=2.0.0"
+    teardown
+}
+
+case_notification_without_hostname() {
+    test_start "containers with no hostname are named by CTID"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS
+    conf_write 200 <<EOF
+#\`\`\`
+#AutoUpdate=registry
+#Image=registry.example.com/org/app:latest
+#\`\`\`
+rootfs: local-zfs:subvol-200-disk-0,size=16G
+unprivileged: 1
+EOF
+    run_script
+    check "title falls back to the CTID" notify_has "LXC 200 updated"
+    check "no stray hostname"            notify_hasnt "ctauto-demo"
+    teardown
+}
+
+case_notification_without_metadata() {
+    test_start "images without OCI labels are reported without those lines"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    run_script
+    check "still updated"          test "$(digest_of 200)" = "$MOCK_DIGEST"
+    check "plain title"            notify_has "ctauto-demo (LXC 200) updated"
+    check "no Version line"        notify_hasnt "Version"
+    check "no Built line"          notify_hasnt "Built "
+    check "no Source line"         notify_hasnt "Source "
+    check "Container line present" notify_has "Container  ctauto-demo (LXC 200)"
+    teardown
+}
+
+case_skopeo_metadata_fallback() {
+    test_start "skopeo without label support falls back to a digest-only inspect"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    export MOCK_SKOPEO_META_FAIL=1
+    run_script
+    check "digest still fetched"   test "$(digest_of 200)" = "$MOCK_DIGEST"
+    check "update still applied"   test -f "$ROOTFS/.autoupdate-unpacked"
+    check "still notified"         notify_has "ctauto-demo (LXC 200) updated"
+    check "no version line"        notify_hasnt "Version"
+    check "digest file stays a single line" bash -c "[ \"\$(wc -l < '$PVE_AUTOUPDATE_STATE_DIR/digest/200.digest')\" = 1 ]"
+    teardown
+}
+
+case_list_reports_hostname_and_version() {
+    test_start "--list reports the hostname and the last applied version"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    seed_meta 200 "image=registry.example.com/org/app:latest" "digest=sha256:aaaa1111" "version=1.0.0"
+    printf 'sha256:aaaa1111\n' > "$PVE_AUTOUPDATE_STATE_DIR/digest/200.digest"
+    run_script --list
+    check "reports the hostname"    grep -F -q "hostname=ctauto-demo" "$OUT_FILE"
+    check "reports the version"     grep -F -q "version=1.0.0" "$OUT_FILE"
+    check "reports the digest"      grep -F -q "digest=sha256:aaaa1111" "$OUT_FILE"
+    check "no mutation"             calls_hasnt "skopeo copy"
+    teardown
+}
+
+# ----------------------------------------------------------------------------
 
 for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
           case_invalid_mode case_unclosed_fence case_key_outside_block \
@@ -598,7 +713,10 @@ for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
           case_legacy_data_layout case_real_storage_cfg_syntax case_mountpoint_mismatch case_foreign_ct \
           case_umoci_failure_rolls_back case_stop_failure case_pull_failure \
           case_snapshot_keep case_pvesm_only_and_stopped_ct case_list_mode \
-          case_ctid_filter case_privileged_no_map case_log_timestamps; do
+          case_ctid_filter case_privileged_no_map case_log_timestamps \
+          case_notification_metadata case_notification_version_change \
+          case_notification_without_hostname case_notification_without_metadata \
+          case_skopeo_metadata_fallback case_list_reports_hostname_and_version; do
     MOCK_DIGEST_DEFAULT=sha256:aaaa1111
     "$fn"
 done

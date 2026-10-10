@@ -20,7 +20,7 @@ Everything else is skipped silently. No lib/ split on purpose: one file, cron fr
 | path | role |
 |---|---|
 | `pve-ct-autoupdate.sh` | the whole implementation (config → parse → resolve → update → notify) |
-| `tests/run-tests.sh` | 77 assertions against fake `pct/zfs/skopeo/umoci/pvesm` in `tests/mockbin/` |
+| `tests/run-tests.sh` | 117 assertions against fake `pct/zfs/skopeo/umoci/pvesm` in `tests/mockbin/` |
 | `examples/` | `ct-conf.example`, `notify.sh` (ntfy hook), `crontab` |
 | `README.md` | user-facing docs: opt-in grammar, options, env vars, limitations |
 | `docs/PLAN.md` | original design + the approved decisions |
@@ -72,6 +72,14 @@ CTIDs in tracked files — fixtures use `registry.example.com`, `ct 200/100`.
   `cmd || rc=$?`.
 - mawk (Debian default awk) makes `split()` produce an empty first field for indented
   lines: strip the leading whitespace before splitting storage.cfg continuation lines.
+- **`skopeo inspect --format` is a Go template**: missing labels render as `<no value>`,
+  a nil `.Created` as `<nil>` (normalize both), and a `--format` string must embed *real*
+  tab characters (`$'\t'`), not `\t`, because the text between `{{...}}` actions is literal.
+  Older skopeo may reject the label lookups, so `remote_image_info` always falls back to a
+  digest-only inspect — metadata must never be a reason to skip an update.
+- The state dir keeps `<ctid>.digest` (single line, authoritative for the digest compare)
+  and `<ctid>.meta` (`key=value`, image metadata of the last applied update). Keep the
+  digest file one line; putting metadata in it would break the digest comparison.
 
 ## Behaviour rules the owner decided
 
@@ -85,6 +93,10 @@ CTIDs in tracked files — fixtures use `registry.example.com`, `ct 200/100`.
   disabled. No TLS-insecure option.
 - uid/gid map from `unprivileged: 1` → `0:100000:65536` (not parsed from `lxc.idmap`).
 - Notifications only for updated containers and failures, `notify.sh <severity> <title>
-  <message>`, one per container. A run with nothing to do must stay silent.
+  <message>`, one per container. A run with nothing to do must stay silent. Title =
+  `<hostname> (LXC <ctid>)[: old → new version]`, body = aligned `key  value` lines
+  (`Container`, `Image`, `Digest`, `Version`, `Built`, `Source`); the container name always
+  uses `hostname:` from the LXC conf, falling back to `LXC <ctid>`. No cross references to
+  other projects in this repo's files.
 - The rootfs is ephemeral (including Proxmox-created passwords/keys); `mpN:` mounts are
   never wiped and never rolled back — that is intended, document it rather than "fix" it.

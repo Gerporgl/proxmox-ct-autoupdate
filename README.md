@@ -103,14 +103,14 @@ A container whose block is missing or malformed is never touched.
 
 ## What happens per container
 
-1. `skopeo inspect` → remote digest. Identical to the stored digest → done, no notification.
+1. `skopeo inspect` → remote digest + image metadata (version, build date, source). Identical to the stored digest → done, no notification.
 2. `skopeo copy` into the local OCI staging dir. **A pull failure never touches the rootfs.**
 3. `pct stop` if the container is running (already-stopped containers stay stopped).
 4. `zfs snapshot <dataset>@autoupdate-<timestamp>`
 5. `find <rootfs> -xdev -mindepth 1 -delete` (extra `mpN:` mounts are not crossed)
 6. `umoci raw unpack` (uid/gid map `0:100000:65536` for `unprivileged: 1`)
 7. `pct start` if it was running, then a status sanity check
-8. store the new digest, prune snapshots, clean the staging dir
+8. store the new digest and metadata, prune snapshots, clean the staging dir
 
 **Rollback:** any failure at or after the wipe triggers `zfs rollback -f` on the
 snapshot, restarts the container if it had been running, sends an error notification,
@@ -139,7 +139,8 @@ are skipped quietly.
 
 ```
 --dry-run          print what would run, change nothing (read-only queries still run)
---list             show opted-in containers + resolved dataset/rootfs, no changes
+--list             show opted-in containers + hostname, resolved dataset/rootfs
+                     and last applied digest/version, no changes
 --ctid <id>        limit the run to this CTID (repeatable)
 --force            apply the update even when the digest did not change
 --verbose          debug logging
@@ -166,10 +167,12 @@ Environment overrides:
 | `PVE_AUTOUPDATE_NOTIFY_CMD` | auto-detected hook (see below) |
 | `PVE_AUTOUPDATE_VERBOSE`, `PVE_AUTOUPDATE_LOG_TIMESTAMPS`, `PVE_AUTOUPDATE_DRY_RUN` | `0` |
 
-The state dir holds only the last applied digest per CTID
-(`<state-dir>/digest/<ctid>.digest`). The OCI staging dir lives on real disk
-(not tmpfs) because images can be several GB. A per-CTID `flock` prevents
-overlapping runs.
+The state dir holds the last applied digest per CTID
+(`<state-dir>/digest/<ctid>.digest`) plus a small `key=value` sidecar with the
+image metadata of that update (`<ctid>.meta`: image, digest, version, created,
+source, revision, updated_at) — that is what makes "what changed" notifications
+possible. The OCI staging dir lives on real disk (not tmpfs) because images can
+be several GB. A per-CTID `flock` prevents overlapping runs.
 
 ## Notifications
 
@@ -184,7 +187,33 @@ Lookup order: `$PVE_AUTOUPDATE_NOTIFY_CMD`, `notify.sh` next to the script,
 
 You only get notified when a container was actually updated, when a run failed,
 or when an opted-in container could not be inspected. A cron run with nothing to
-do sends nothing. `examples/notify.sh` is an ntfy (or any HTTP) example:
+do sends nothing.
+
+### What a notification looks like
+
+The title carries the container **hostname** (from `hostname:` in the LXC config,
+falling back to the CTID) and the version change; the body is a block of aligned
+`key  value` lines:
+
+```
+title: ctauto-demo (LXC 200): 1.2.3 → 2.0.0
+
+Container  ctauto-demo (LXC 200)
+Image      registry.example.com/org/app:latest
+Digest     sha256:aaaa1111bbbb… → sha256:cccc3333dddd…
+Version    1.2.3 → 2.0.0
+Built      2026-02-01T12:00:00Z
+Source     https://github.com/example/app
+```
+
+The version lines come from the OCI labels `org.opencontainers.image.version`,
+`.created` and `.source` (build date falls back to the image config); the *old*
+values are the ones stored in `<ctid>.meta` by the previous run. An
+image without those labels is simply reported without those lines — never an
+error. Failure notifications carry the same `Container` / `Image` block plus the
+reason.
+
+`examples/notify.sh` is an ntfy (or any HTTP) example:
 
 ```sh
 install -m 0755 examples/notify.sh /usr/local/bin/pve-ct-autoupdate-notify.sh
@@ -212,7 +241,8 @@ missing tag, unknown keys), non-ZFS storage, modern *and* legacy ZFS layouts,
 mountpoint mismatch, foreign cluster nodes, stopped containers, pull failure
 (no rollback, keeps going), unpack failure (rollback + abort), snapshot pruning
 with `SnapshotKeep`, privileged vs unprivileged id mapping, `--dry-run` and
-`--list`.
+`--list`, notification content (hostname, version/digest diffs, label-less images,
+skopeo metadata fallback).
 
 ## Limitations
 

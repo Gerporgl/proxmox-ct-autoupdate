@@ -101,6 +101,83 @@ notify() {
 }
 
 # ----------------------------------------------------------------------------
+# Message building
+# ----------------------------------------------------------------------------
+#
+# A short title carrying the container name plus the version change, and a body
+# of aligned "key  value" lines. Container names use the hostname from the LXC
+# config; the CTID is always part of the name.
+
+# CT_HOSTNAME / CT_IMAGE are set by process_container and used by the failure
+# notifications below.
+CT_CTID="" CT_HOSTNAME="" CT_IMAGE=""
+
+ct_name() {
+    local ctid=$1 host=$2
+    if [[ -n $host ]]; then printf '%s (LXC %s)' "$host" "$ctid"
+    else printf 'LXC %s' "$ctid"; fi
+}
+
+# A full digest is unreadable in a push notification; keep enough to identify it.
+short_digest() {
+    local d=$1
+    if [[ ${#d} -gt 19 ]]; then printf '%s…' "${d:0:19}"
+    else printf '%s' "$d"; fi
+}
+
+# "old → new" when both are known and different, the known value otherwise.
+diff_value() {
+    local old=$1 new=$2
+    if [[ -n $old && -n $new && $old != "$new" ]]; then printf '%s → %s' "$old" "$new"
+    elif [[ -n $new ]]; then printf '%s' "$new"
+    elif [[ -n $old ]]; then printf '%s' "$old"; fi
+}
+
+update_title() {
+    local name=$1 oldv=$2 newv=$3
+    if [[ -n $oldv && -n $newv && $oldv != "$newv" ]]; then
+        printf '%s: %s → %s' "$name" "$oldv" "$newv"
+    elif [[ -n $newv ]]; then
+        printf '%s → %s' "$name" "$newv"
+    else
+        printf '%s updated' "$name"
+    fi
+}
+
+declare -a KV_KEYS=() KV_VALS=()
+
+kv_add() { [[ -z $2 ]] && return 0; KV_KEYS+=("$1"); KV_VALS+=("$2"); return 0; }
+
+# Renders KV_KEYS/KV_VALS as aligned "key  value" lines.
+kv_render() {
+    local w=0 i k
+    for k in "${KV_KEYS[@]}"; do if (( ${#k} > w )); then w=${#k}; fi; done
+    for ((i = 0; i < ${#KV_KEYS[@]}; i++)); do
+        printf '%s\n' "$(printf '%-*s  %s' "$w" "${KV_KEYS[i]}" "${KV_VALS[i]}")"
+    done
+    return 0
+}
+
+# Common identification block of every notification body.
+kv_start() { # <name> [image]
+    KV_KEYS=() KV_VALS=()
+    kv_add Container "$1"
+    [[ $# -ge 2 ]] && kv_add Image "$2" || true
+    return 0
+}
+
+# Failure notification: <severity> <title suffix> <reason> [extra key value ...]
+notify_fail() {
+    local severity=$1 suffix=$2 reason=$3
+    local name body
+    name=$(ct_name "$CT_CTID" "$CT_HOSTNAME")
+    kv_start "$name" "$CT_IMAGE"
+    body=$(kv_render)
+    body+=$'\n'$'\n'"$reason"
+    notify "$severity" "$name $suffix" "$body"
+}
+
+# ----------------------------------------------------------------------------
 # Small helpers
 # ----------------------------------------------------------------------------
 
@@ -222,6 +299,7 @@ CFG_HAS_BLOCK=0
 CFG_BLOCK_INVALID=0
 CFG_IMAGE=""
 CFG_KEEP=""
+CFG_HOSTNAME=""
 CFG_ROOTFS_STORE=""
 CFG_ROOTFS_VOL=""
 CFG_UNPRIVILEGED=0
@@ -232,7 +310,7 @@ parse_container_conf() {
     local line key value fence=0 fences=0 image_seen=0 autoupdate_seen=0 bad=0
 
     CFG_HAS_BLOCK=0 CFG_BLOCK_INVALID=0 CFG_IMAGE="" CFG_KEEP=""
-    CFG_ROOTFS_STORE="" CFG_ROOTFS_VOL="" CFG_UNPRIVILEGED=0
+    CFG_HOSTNAME="" CFG_ROOTFS_STORE="" CFG_ROOTFS_VOL="" CFG_UNPRIVILEGED=0
     CFG_MOUNTPOINTS=()
 
     while IFS= read -r line || [[ -n $line ]]; do
@@ -286,6 +364,8 @@ parse_container_conf() {
             CFG_ROOTFS_VOL=${BASH_REMATCH[2]}
         elif [[ $line =~ ^[[:space:]]*unprivileged:[[:space:]]*1[[:space:]]*$ ]]; then
             CFG_UNPRIVILEGED=1
+        elif [[ $line =~ ^[[:space:]]*hostname:[[:space:]]*([^,[:space:]]+) ]]; then
+            CFG_HOSTNAME=${BASH_REMATCH[1]}
         elif [[ $line =~ ^[[:space:]]*mp[0-9]+:[[:space:]]*[^,]*,mp=([^,[:space:]]+) ]]; then
             CFG_MOUNTPOINTS+=("${BASH_REMATCH[1]}")
         fi
@@ -480,6 +560,11 @@ validate_rootfs_dataset() {
 
 digest_file() { printf '%s/%s.digest' "$DIGEST_DIR" "$1"; }
 
+# Sidecar with the image metadata of the last applied update, so the next run
+# can report what changed (version, build date, source repo) and not just that
+# the digest moved.
+meta_file() { printf '%s/%s.meta' "$DIGEST_DIR" "$1"; }
+
 read_local_digest() {
     local f
     f=$(digest_file "$1")
@@ -494,9 +579,85 @@ write_local_digest() {
     mv -f "$tmp" "$f"
 }
 
-remote_digest() {
-    local image=$1
-    skopeo inspect --format '{{.Digest}}' "docker://$image" 2>/dev/null
+# Fields asked from skopeo in one inspect call, tab separated: digest, version,
+# created (OCI label first, config field as fallback), source, revision.
+skopeo_format() {
+    local t=$'\t'
+    printf '{{.Digest}}%s{{index .Labels "org.opencontainers.image.version"}}%s{{index .Labels "org.opencontainers.image.created"}}%s{{.Created}}%s{{index .Labels "org.opencontainers.image.source"}}%s{{index .Labels "org.opencontainers.image.revision"}}' \
+        "$t" "$t" "$t" "$t" "$t"
+}
+
+# Go templates print these placeholders for missing/nil fields.
+normalize_field() {
+    case $1 in
+        '<no value>' | '<nil>' | 'null' | '""') printf '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+    return 0
+}
+
+REMOTE_DIGEST="" REMOTE_VERSION="" REMOTE_CREATED="" REMOTE_SOURCE="" REMOTE_REVISION=""
+
+# Fills REMOTE_* for an image; returns non-zero when the registry gave us no
+# digest at all. Missing metadata labels are not an error: the image is simply
+# reported without those lines.
+remote_image_info() {
+    local image=$1 out label_created
+    REMOTE_DIGEST="" REMOTE_VERSION="" REMOTE_CREATED="" REMOTE_SOURCE="" REMOTE_REVISION=""
+
+    if out=$(skopeo inspect --format "$(skopeo_format)" "docker://$image" 2>/dev/null) && [[ -n $out ]]; then
+        IFS=$'\t' read -r REMOTE_DIGEST REMOTE_VERSION REMOTE_CREATED label_created REMOTE_SOURCE REMOTE_REVISION <<<"$out"
+        REMOTE_DIGEST=${REMOTE_DIGEST%%$'\t'*}
+        REMOTE_VERSION=$(normalize_field "$REMOTE_VERSION")
+        REMOTE_SOURCE=$(normalize_field "$REMOTE_SOURCE")
+        REMOTE_REVISION=$(normalize_field "$REMOTE_REVISION")
+        REMOTE_CREATED=$(normalize_field "$REMOTE_CREATED")
+        [[ -z $REMOTE_CREATED ]] && REMOTE_CREATED=$(normalize_field "$label_created")
+        [[ -n $REMOTE_DIGEST ]] && return 0
+    fi
+
+    # Older skopeo whose --format cannot handle the label lookups: still get the
+    # digest, just without metadata.
+    out=$(skopeo inspect --format '{{.Digest}}' "docker://$image" 2>/dev/null) || return 1
+    [[ -n $out ]] || return 1
+    REMOTE_DIGEST=${out%%$'\t'*}
+    return 0
+}
+
+META_IMAGE="" META_DIGEST="" META_VERSION="" META_CREATED="" META_SOURCE="" META_REVISION=""
+
+read_local_meta() {
+    local f=$1 line key value
+    META_IMAGE="" META_DIGEST="" META_VERSION="" META_CREATED="" META_SOURCE="" META_REVISION=""
+    [[ -r $f ]] || return 1
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line == *=* ]] || continue
+        key=${line%%=*}; value=${line#*=}
+        case $key in
+            image)     META_IMAGE=$value ;;
+            digest)    META_DIGEST=$value ;;
+            version)   META_VERSION=$value ;;
+            created)   META_CREATED=$value ;;
+            source)    META_SOURCE=$value ;;
+            revision)  META_REVISION=$value ;;
+            updated_at) : ;;
+        esac
+    done < "$f"
+    return 0
+}
+
+write_local_meta() {
+    local ctid=$1 f tmp
+    f=$(meta_file "$ctid"); tmp="$f.tmp.$$"
+    {
+        printf 'image=%s\n' "$CT_IMAGE"
+        printf 'digest=%s\n' "$REMOTE_DIGEST"
+        printf 'version=%s\n' "$REMOTE_VERSION"
+        printf 'created=%s\n' "$REMOTE_CREATED"
+        printf 'source=%s\n' "$REMOTE_SOURCE"
+        printf 'revision=%s\n' "$REMOTE_REVISION"
+        printf 'updated_at=%s\n' "$(_ts)"
+    } > "$tmp" && mv -f "$tmp" "$f"
 }
 
 # ----------------------------------------------------------------------------
@@ -546,8 +707,9 @@ rollback_container() {
     if [[ $was_running == 1 ]]; then
         run_cmd pct start "$ctid" || log_warn "ct $ctid: could not restart after rollback"
     fi
-    notify error "LXC $ctid update failed, rolled back" \
-        "CT $ctid: update aborted ($reason). Filesystem restored from snapshot $snap."
+    CT_CTID=$ctid
+    notify_fail error "update failed, rolled back" \
+        "Update aborted ($reason). The rootfs was restored from snapshot $snap."
     ABORT=1
 }
 
@@ -567,6 +729,7 @@ process_container() {
     esac
 
     image=$VALIDATED_IMAGE
+    CT_CTID=$ctid CT_HOSTNAME=$CFG_HOSTNAME CT_IMAGE=$image
     [[ -n $CFG_KEEP ]] && keep=$CFG_KEEP
 
     if ! resolve_rootfs "$ctid" "$CFG_ROOTFS_VOL" "$CFG_ROOTFS_STORE"; then
@@ -578,10 +741,16 @@ process_container() {
     local ds=$CT_DS path=$CT_ROOTFS_PATH
 
     if [[ $LIST_ONLY == 1 ]]; then
+        local known_digest known_version
+        known_digest=$(read_local_digest "$ctid")
+        read_local_meta "$(meta_file "$ctid")" || true
+        known_version=$META_VERSION
         printf 'ct %-6s image=%s\n' "$ctid" "$image"
+        printf '         hostname=%s\n' "${CFG_HOSTNAME:-—}"
         printf '         store=%s pool=%s\n' "$CFG_ROOTFS_STORE" "$CT_POOL"
         printf '         dataset=%s\n' "$ds"
         printf '         rootfs=%s keep=%s unprivileged=%s\n' "$path" "$keep" "$CFG_UNPRIVILEGED"
+        printf '         applied digest=%s version=%s\n' "${known_digest:-none}" "${known_version:-unknown}"
         return 0
     fi
 
@@ -589,14 +758,16 @@ process_container() {
 
     # ---- digest check ------------------------------------------------------
     local remote local_digest
-    if ! remote=$(remote_digest "$image"); then
+    if ! remote_image_info "$image"; then
         log_error "ct $ctid: skopeo inspect failed for $image (registry unreachable?)"
-        notify warning "LXC $ctid update skipped" \
-            "CT $ctid: could not inspect $image, no update applied."
+        notify_fail warning "update skipped" \
+            "The image could not be inspected, no update was applied."
         return 0
     fi
+    remote=$REMOTE_DIGEST
     local_digest=$(read_local_digest "$ctid")
-    log_debug "ct $ctid: remote digest=${remote:-none} local digest=${local_digest:-none}"
+    read_local_meta "$(meta_file "$ctid")" || true
+    log_debug "ct $ctid: remote digest=${remote:-none} local digest=${local_digest:-none} remote version=${REMOTE_VERSION:-none} local version=${META_VERSION:-none}"
 
     if [[ -n $remote && $remote == "$local_digest" && $FORCE != 1 ]]; then
         log_info "ct $ctid: already at $remote, nothing to do"
@@ -629,8 +800,8 @@ process_container() {
         log_error "ct $ctid: skopeo copy failed, rootfs untouched"
         cleanup_oci "$ctid"
         [[ -n $lockfd ]] && exec {lockfd}>&-
-        notify error "LXC $ctid update failed" \
-            "CT $ctid: could not pull $image. The container rootfs was not modified."
+        notify_fail error "update failed" \
+            "The image could not be pulled. The container rootfs was not modified."
         return 0
     fi
 
@@ -644,7 +815,8 @@ process_container() {
             log_error "ct $ctid: container is still running, aborting (rootfs untouched)"
             cleanup_oci "$ctid"
             [[ -n $lockfd ]] && exec {lockfd}>&-
-            notify error "LXC $ctid update failed" "CT $ctid: container could not be stopped."
+            notify_fail error "update failed" \
+                "The container could not be stopped; the rootfs was not modified."
             return 0
         fi
     fi
@@ -658,7 +830,8 @@ process_container() {
         log_error "ct $ctid: zfs snapshot failed, rootfs untouched"
         cleanup_oci "$ctid"
         [[ -n $lockfd ]] && exec {lockfd}>&-
-        notify error "LXC $ctid update failed" "CT $ctid: could not snapshot $ds."
+        notify_fail error "update failed" \
+            "Could not snapshot $ds; the rootfs was not modified."
         return 0
     fi
     log_info "ct $ctid: snapshot $snap"
@@ -708,10 +881,21 @@ process_container() {
     # ---- success ------------------------------------------------------------
     if [[ $DRY_RUN != 1 ]]; then
         write_local_digest "$ctid" "$remote"
+        write_local_meta "$ctid"
     fi
     log_info "ct $ctid: updated to $remote"
-    notify info "LXC $ctid updated" \
-        "CT $ctid updated from ${local_digest:-none} to $remote (image: $image)."
+
+    # ---- notification: aligned key/value block ---------------------------
+    local name title body
+    name=$(ct_name "$ctid" "$CFG_HOSTNAME")
+    title=$(update_title "$name" "$META_VERSION" "$REMOTE_VERSION")
+    kv_start "$name" "$image"
+    kv_add Digest "$(diff_value "$(short_digest "$local_digest")" "$(short_digest "$remote")")"
+    kv_add Version "$(diff_value "$META_VERSION" "$REMOTE_VERSION")"
+    kv_add Built "$(diff_value "$META_CREATED" "$REMOTE_CREATED")"
+    kv_add Source "${REMOTE_SOURCE:-$META_SOURCE}"
+    body=$(kv_render)
+    notify info "$title" "$body"
 
     cleanup_oci "$ctid"
     prune_snapshots "$ds" "$keep"
@@ -722,7 +906,8 @@ process_container() {
 die_unreachable() {
     local ctid=$1 image=$2
     log_error "ct $ctid: no digest available for $image"
-    notify warning "LXC $ctid update skipped" "CT $ctid: no digest for $image."
+    CT_CTID=$ctid CT_IMAGE=$image
+    notify_fail warning "update skipped" "The registry reported no digest for this image."
 }
 
 # ----------------------------------------------------------------------------

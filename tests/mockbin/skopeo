@@ -6,7 +6,23 @@ echo "skopeo $*" >> "$MOCK_CALLS"
 case $sub in
     inspect)
         [[ ${MOCK_SKOPEO_INSPECT_FAIL:-0} == 1 ]] && exit 1
-        printf '%s\n' "${MOCK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}"
+        # does the caller ask for the metadata labels?
+        want_meta=0
+        for a in "$@"; do [[ $a == *".Labels"* ]] && want_meta=1; done
+        digest=${MOCK_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+        if [[ $want_meta == 1 ]]; then
+            # simulates "skopeo inspect --format" with tab separated fields:
+            # digest, version, created(label), created(config), source, revision
+            if [[ ${MOCK_SKOPEO_META_FAIL:-0} == 1 ]]; then
+                echo "invalid format: can't evaluate field Labels" >&2
+                exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$digest" \
+                "${MOCK_VERSION:-<no value>}" "${MOCK_LABEL_CREATED:-<no value>}" \
+                "${MOCK_CREATED:-<nil>}" "${MOCK_SOURCE:-<no value>}" "${MOCK_REVISION:-<no value>}"
+        else
+            printf '%s\n' "$digest"
+        fi
         ;;
     copy)
         [[ ${MOCK_SKOPEO_COPY_FAIL:-0} == 1 ]] && exit 1
