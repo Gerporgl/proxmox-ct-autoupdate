@@ -19,4 +19,15 @@ if [[ -z $path ]]; then
     exit 1
 fi
 printf 'fake rootfs\n' > "$path/.autoupdate-unpacked"
+# Stand-in for the payload a real image ships: files under /root that an mpN
+# mount bound over /root would shadow, plus one file outside any mountpoint.
+mkdir -p "$path/root/.cache" "$path/etc"
+printf '#!/bin/sh\n' > "$path/root/.profile"
+printf 'x\n' > "$path/root/.cache/x"
+printf 'hosts\n' > "$path/etc/hosts"
+# Optional: an image that ships a symlinked directory (an escape hatch a "clean"
+# must refuse to follow).
+if [[ -n ${MOCK_UMOCI_SYMLINK:-} ]]; then
+    ln -s "${MOCK_UMOCI_SYMLINK_TARGET:-etc}" "$path/$MOCK_UMOCI_SYMLINK"
+fi
 exit 0

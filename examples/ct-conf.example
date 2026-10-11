@@ -33,6 +33,10 @@ hostname: ctauto-demo
 memory: 4096
 net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
 ostype: ubuntu
+# A second volume bound over /root: Proxmox keeps that rootfs directory empty (and
+# vzdump needs it that way), so after an update the image's own /root/.bashrc and
+# friends are deleted again by the updater. Nothing under this mount is ever touched.
+mp0: local-zfs:subvol-100-disk-1,mp=/root,size=8G
 rootfs: local-zfs:subvol-100-disk-0,size=16G
 swap: 0
 unprivileged: 1

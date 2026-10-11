@@ -24,7 +24,7 @@ set -euo pipefail
 # ----------------------------------------------------------------------------
 
 PROG=${0##*/}
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 LXC_DIR=${PVE_AUTOUPDATE_LXC_DIR:-/etc/pve/lxc}
 STORAGE_CFG=${PVE_AUTOUPDATE_STORAGE_CFG:-/etc/pve/storage.cfg}
@@ -40,6 +40,7 @@ SNAPSHOT_PREFIX=${PVE_AUTOUPDATE_SNAPSHOT_PREFIX:-autoupdate}
 IDMAP=${PVE_AUTOUPDATE_IDMAP:-0:100000:65536}
 
 DRY_RUN=${PVE_AUTOUPDATE_DRY_RUN:-0}
+CLEAN_MOUNTPOINTS=${PVE_AUTOUPDATE_CLEAN_MOUNTPOINTS:-1}
 VERBOSE=${PVE_AUTOUPDATE_VERBOSE:-0}
 LOG_TIMESTAMPS=${PVE_AUTOUPDATE_LOG_TIMESTAMPS:-0}
 FORCE=0
@@ -217,6 +218,11 @@ Usage: $PROG [options]
                      resolved. No registry pull, no changes.
   --ctid <id>        Only consider this container id (repeatable).
   --force            Apply the update even if the digest did not change.
+  --no-clean-mountpoints
+                     Do not re-empty the rootfs directories that mpN: mounts are
+                     bound over. On by default: Proxmox keeps those directories
+                     empty and vzdump needs that invariant, but an OCI image
+                     re-creates shadowed files (e.g. /root/.bashrc) on unpack.
   --verbose          Extra debug logging.
   --log-timestamps   Prefix every log line with a YYYY-MM-DD HH:MM:SS timestamp
                      (also for --dry-run output). Off by default.
@@ -232,7 +238,8 @@ Environment:
   PVE_AUTOUPDATE_DIGEST_DIR, PVE_AUTOUPDATE_OCI_DIR, PVE_AUTOUPDATE_LOCK_DIR,
   PVE_AUTOUPDATE_SNAPSHOT_KEEP, PVE_AUTOUPDATE_SNAPSHOT_PREFIX,
   PVE_AUTOUPDATE_IDMAP, PVE_AUTOUPDATE_NOTIFY_CMD, PVE_AUTOUPDATE_VERBOSE,
-  PVE_AUTOUPDATE_LOG_TIMESTAMPS, PVE_AUTOUPDATE_DRY_RUN
+  PVE_AUTOUPDATE_LOG_TIMESTAMPS, PVE_AUTOUPDATE_DRY_RUN,
+  PVE_AUTOUPDATE_CLEAN_MOUNTPOINTS
 EOF
 }
 
@@ -246,6 +253,8 @@ while (($#)); do
         --list) LIST_ONLY=1 ;;
         --ctid) [[ $# -ge 2 ]] || die "--ctid needs an argument"; ONLY_CTID+=("$2"); shift ;;
         --force) FORCE=1 ;;
+        --clean-mountpoints) CLEAN_MOUNTPOINTS=1 ;;
+        --no-clean-mountpoints) CLEAN_MOUNTPOINTS=0 ;;
         --verbose) VERBOSE=1 ;;
         --log-timestamps) LOG_TIMESTAMPS=1 ;;
         --state-dir) [[ $# -ge 2 ]] || die "--state-dir needs an argument"; STATE_DIR=$2; DIGEST_DIR=$STATE_DIR/digest; OCI_DIR=$STATE_DIR/oci; shift ;;
@@ -259,7 +268,10 @@ while (($#)); do
 done
 
 LIST_ONLY=${LIST_ONLY:-0}
+CLEAN_MOUNTPOINTS=${CLEAN_MOUNTPOINTS:-1}
 is_number "$SNAPSHOT_KEEP" || die "--snapshot-keep must be a number"
+[[ $CLEAN_MOUNTPOINTS == 0 || $CLEAN_MOUNTPOINTS == 1 ]] ||
+    die "PVE_AUTOUPDATE_CLEAN_MOUNTPOINTS must be 0 or 1"
 
 # ----------------------------------------------------------------------------
 # Dependency checks
@@ -366,8 +378,24 @@ parse_container_conf() {
             CFG_UNPRIVILEGED=1
         elif [[ $line =~ ^[[:space:]]*hostname:[[:space:]]*([^,[:space:]]+) ]]; then
             CFG_HOSTNAME=${BASH_REMATCH[1]}
-        elif [[ $line =~ ^[[:space:]]*mp[0-9]+:[[:space:]]*[^,]*,mp=([^,[:space:]]+) ]]; then
-            CFG_MOUNTPOINTS+=("${BASH_REMATCH[1]}")
+        elif [[ $line =~ ^[[:space:]]*(mp[0-9]+):[[:space:]]*(.*)$ ]]; then
+            # "mp0: store:volid,mp=/data,backup=1,size=8G" — the mp= option is what
+            # names the rootfs directory the volume gets bound over. Parse the whole
+            # option list so the position of mp= does not matter, and keep the
+            # mountpoint even when backup=0 (they are all cleaned the same way).
+            local mp_opt mp_target="" mp_rest=${BASH_REMATCH[2]}
+            local -a mp_opts=()
+            mp_rest=${mp_rest%"${mp_rest##*[![:space:]]}"}     # rtrim
+            IFS=',' read -ra mp_opts <<< "$mp_rest"
+            for mp_opt in "${mp_opts[@]}"; do
+                mp_opt=${mp_opt#"${mp_opt%%[![:space:]]*}"}     # ltrim
+                if [[ $mp_opt == mp=* ]]; then mp_target=${mp_opt#mp=}; fi
+            done
+            if [[ -n $mp_target ]]; then
+                CFG_MOUNTPOINTS+=("$mp_target")
+            else
+                log_debug "ct $ctid: ${BASH_REMATCH[1]}: has no mp= option, ignoring"
+            fi
         fi
     done < "$conf"
 
@@ -714,6 +742,175 @@ rollback_container() {
 }
 
 # ----------------------------------------------------------------------------
+# mpN: mountpoint sanitising
+# ----------------------------------------------------------------------------
+#
+# Proxmox never lets a secondary volume (mpN:) be bound over a *non-empty*
+# directory in the rootfs, and vzdump relies on that invariant: it snapshots the
+# rootfs dataset and chokes when a mounted volume would cover real files (a
+# common symptom is a backup failing over /root because the image shipped
+# .bashrc/.profile/.cache there). A fresh `umoci raw unpack` re-creates exactly
+# those shadowed files, so we empty the shadowed directories again right after
+# unpacking.
+#
+# Why this is safe to do there and only there:
+#   * the container is stopped, so the mpN: volumes are NOT mounted and every
+#     path below $root is rootfs content, not volume content;
+#   * the rootfs was just wiped and re-populated by umoci alone, so nothing we
+#     delete is operator data — it is only what the image shipped;
+#   * everything under a mountpoint target is hidden by the bind mount for the
+#     whole lifetime of the container, so removing it cannot change behaviour;
+#   * we never resolve the mpN: source volume at all — the only path we ever
+#     name is "$root/<target>" with $root the already validated ZFS dataset
+#     mountpoint, and the guards below refuse a target that looks like a mount.
+
+MP_CLEANED=() MP_SKIPPED=()
+
+# Owner that rootfs files get from the host side of the id mapping.
+map_owner() {
+    if [[ $CFG_UNPRIVILEGED == 1 ]]; then
+        local host=${IDMAP#*:}
+        host=${host%%:*}
+        if [[ $host =~ ^[0-9]+$ ]]; then
+            printf '%s:%s' "$host" "$host"
+            return 0
+        fi
+    fi
+    printf '0:0'
+    return 0
+}
+
+# Absolute, normalised, no '.'/'..'/'//' components, no whitespace.
+mp_target_rel() { # <target> -> prints the path relative to the rootfs
+    local t=$1 rel comp
+    local -a comps=()
+    [[ $t == /* ]] || return 1
+    [[ $t =~ [[:space:]] ]] && return 1
+    rel=${t#/}
+    while [[ $rel == */ ]]; do rel=${rel%/}; done
+    [[ -n $rel ]] || return 1
+    IFS='/' read -ra comps <<< "$rel"
+    for comp in "${comps[@]}"; do
+        if [[ -z $comp || $comp == . || $comp == .. ]]; then return 1; fi
+    done
+    printf '%s' "$rel"
+    return 0
+}
+
+# Reject a target whose path crosses a symlink inside the rootfs: an image could
+# ship /var as a symlink and "clean" would then follow it somewhere else.
+mp_crosses_symlink() { # <root> <rel>
+    local cur=$1 comp
+    local -a comps=()
+    IFS='/' read -ra comps <<< "$2"
+    for comp in "${comps[@]}"; do
+        cur="$cur/$comp"
+        if [[ -L $cur ]]; then return 0; fi
+    done
+    return 1
+}
+
+is_mount_point() { # <path>
+    [[ -r /proc/mounts ]] || return 1
+    awk -v p="$1" '$2 == p { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts
+}
+
+# Create the empty target directory PVE expects, then hand ownership of every
+# component we created to the container's root (host-side uid): a directory
+# owned by the host's uid 0 would be "nobody" inside an unprivileged CT.
+ensure_mp_dir() { # <root> <rel>
+    local root=$1 rel=$2 cur=$root comp owner first_missing=""
+    local -a comps=()
+    IFS='/' read -ra comps <<< "$rel"
+    for comp in "${comps[@]}"; do
+        cur="$cur/$comp"
+        if [[ -z $first_missing && ! -e $cur ]]; then first_missing=$cur; fi
+    done
+    run_cmd mkdir -p "$root/$rel" || return 1
+    [[ -z $first_missing ]] && return 0
+    owner=$(map_owner)
+    cur=$first_missing
+    while [[ $cur == "$root"/* ]]; do
+        run_cmd chown "$owner" "$cur" ||
+            log_warn "could not chown '$cur' to $owner (mountpoint target ownership may be wrong)"
+        cur=${cur%/*}
+    done
+    return 0
+}
+
+# Returns non-zero only when a delete/create actually failed: a refusal (odd
+# path, symlink, mounted target) is a warning, never a reason to roll back.
+clean_mountpoint_targets() { # <ctid> <rootfs path>
+    local ctid=$1 root=$2
+    local t rel dir dev rc=0
+
+    MP_CLEANED=() MP_SKIPPED=()
+    if ((${#CFG_MOUNTPOINTS[@]} == 0)); then
+        return 0
+    fi
+    dev=$(stat -c %d "$root" 2>/dev/null || printf '%s' "")
+
+    for t in "${CFG_MOUNTPOINTS[@]}"; do
+        if ! rel=$(mp_target_rel "$t"); then
+            log_warn "ct $ctid: mountpoint target '$t' is not a usable absolute path, leaving it alone"
+            MP_SKIPPED+=("$t")
+            continue
+        fi
+        dir="$root/$rel"
+
+        if mp_crosses_symlink "$root" "$rel"; then
+            log_warn "ct $ctid: '$dir' crosses a symlink inside the rootfs, refusing to touch it"
+            MP_SKIPPED+=("$t")
+            continue
+        fi
+        if is_mount_point "$dir"; then
+            log_warn "ct $ctid: '$dir' is a mount point (secondary volume still mounted?), refusing"
+            MP_SKIPPED+=("$t")
+            continue
+        fi
+        if [[ -d $dir && ! -L $dir && -n $dev ]] &&
+           [[ $(stat -c %d "$dir" 2>/dev/null || printf '%s' unknown) != "$dev" ]]; then
+            log_warn "ct $ctid: '$dir' is on another device than the rootfs, refusing to clean it"
+            MP_SKIPPED+=("$t")
+            continue
+        fi
+
+        if [[ -e $dir && ! -L $dir ]] && [[ ! -d $dir ]]; then
+            log_warn "ct $ctid: mountpoint target '$t' exists but is not a directory, refusing to touch it"
+            MP_SKIPPED+=("$t")
+            continue
+        fi
+
+        if [[ -d $dir ]]; then
+            if [[ $DRY_RUN != 1 && -z $(ls -A "$dir" 2>/dev/null) ]]; then
+                log_debug "ct $ctid: mountpoint target '$t' is already empty"
+                continue
+            fi
+            log_info "ct $ctid: emptying '$t' — files there are shadowed by the mount anyway"
+            if ! run_cmd find "$dir" -xdev -mindepth 1 -delete; then
+                log_error "ct $ctid: could not empty the mountpoint target '$t'"
+                MP_SKIPPED+=("$t")
+                rc=1
+                continue
+            fi
+            MP_CLEANED+=("$t")
+        else
+            log_info "ct $ctid: creating empty mountpoint target '$t' (absent from the image)"
+            if ! ensure_mp_dir "$root" "$rel"; then
+                log_error "ct $ctid: could not create the mountpoint target '$t'"
+                MP_SKIPPED+=("$t")
+                rc=1
+                continue
+            fi
+        fi
+    done
+    if ((${#MP_CLEANED[@]})) || ((${#MP_SKIPPED[@]})); then
+        log_info "ct $ctid: mountpoint targets emptied: ${MP_CLEANED[*]:-none}; left alone: ${MP_SKIPPED[*]:-none}"
+    fi
+    return $rc
+}
+
+# ----------------------------------------------------------------------------
 # Per container processing
 # ----------------------------------------------------------------------------
 
@@ -750,6 +947,7 @@ process_container() {
         printf '         store=%s pool=%s\n' "$CFG_ROOTFS_STORE" "$CT_POOL"
         printf '         dataset=%s\n' "$ds"
         printf '         rootfs=%s keep=%s unprivileged=%s\n' "$path" "$keep" "$CFG_UNPRIVILEGED"
+        printf '         mountpoints=%s clean=%s\n' "${CFG_MOUNTPOINTS[*]:-none}" "$CLEAN_MOUNTPOINTS"
         printf '         applied digest=%s version=%s\n' "${known_digest:-none}" "${known_version:-unknown}"
         return 0
     fi
@@ -857,6 +1055,14 @@ process_container() {
 
     if [[ $DRY_RUN != 1 && -z $(ls -A "$path" 2>/dev/null) ]]; then
         rollback_container "$ctid" "$ds" "$snap" "$was_running" "rootfs is empty after unpack"
+        cleanup_oci "$ctid"
+        return 0
+    fi
+
+    # ---- keep the mpN: mountpoint targets empty (PVE backup invariant) -----
+    if [[ $CLEAN_MOUNTPOINTS == 1 ]] &&
+       ! clean_mountpoint_targets "$ctid" "$path"; then
+        rollback_container "$ctid" "$ds" "$snap" "$was_running" "mountpoint cleanup failed"
         cleanup_oci "$ctid"
         return 0
     fi

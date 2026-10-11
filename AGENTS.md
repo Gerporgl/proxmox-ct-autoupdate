@@ -11,7 +11,8 @@ their config comments (written from the Proxmox UI *Summary* field), it refreshe
 container rootfs from an OCI image when the registry digest changed:
 
 `skopeo inspect` → `skopeo copy` → `pct stop` → `zfs snapshot` → wipe rootfs →
-`umoci raw unpack` → `pct start` → store digest → prune snapshot.
+`umoci raw unpack` → empty the `mpN:` mountpoint targets → `pct start` → store
+digest → prune snapshot.
 
 Everything else is skipped silently. No lib/ split on purpose: one file, cron friendly.
 
@@ -20,7 +21,7 @@ Everything else is skipped silently. No lib/ split on purpose: one file, cron fr
 | path | role |
 |---|---|
 | `pve-ct-autoupdate.sh` | the whole implementation (config → parse → resolve → update → notify) |
-| `tests/run-tests.sh` | 117 assertions against fake `pct/zfs/skopeo/umoci/pvesm` in `tests/mockbin/` |
+| `tests/run-tests.sh` | 154 assertions against fake `pct/zfs/skopeo/umoci/pvesm` in `tests/mockbin/` |
 | `examples/` | `ct-conf.example`, `notify.sh` (ntfy hook), `crontab` |
 | `README.md` | user-facing docs: opt-in grammar, options, env vars, limitations |
 | `docs/PLAN.md` | original design + the approved decisions |
@@ -80,6 +81,20 @@ CTIDs in tracked files — fixtures use `registry.example.com`, `ct 200/100`.
 - The state dir keeps `<ctid>.digest` (single line, authoritative for the digest compare)
   and `<ctid>.meta` (`key=value`, image metadata of the last applied update). Keep the
   digest file one line; putting metadata in it would break the digest comparison.
+- **PVE keeps the rootfs directory that an `mpN:` mount is bound over empty**, and
+  `vzdump` depends on it: a fresh image re-creates `/root/.bashrc`, `.profile`,
+  `.cache/…` under a `mp0: …,mp=/root` mount and the next backup fails on those
+  shadowed files. Fix = empty the target again right after unpack (container is
+  stopped, so the secondary volumes are not mounted there). Guards that must stay:
+  never resolve the `mpN:` *source* volume (only name `<dataset mountpoint>/<target>`),
+  refuse targets that are mount points, on a different device (`stat -c %d` vs the
+  rootfs device), contain `.`/`..`/empty components, or cross a rootfs symlink — and a
+  refusal is a warning, never a rollback.
+- A `[[ … ]] && cmd` as the **last** command of a `for`/`while` body makes the loop
+  return 1 and kills the run under `set -e`; use an explicit `if` in loops.
+- In a test that generates a helper script with an **unquoted** heredoc, `\"` stays a
+  literal backslash-quote (only `$`, backtick, `\` and newline are special there) —
+  write the helper with a quoted heredoc and pass paths through exported env vars.
 
 ## Behaviour rules the owner decided
 
@@ -100,3 +115,9 @@ CTIDs in tracked files — fixtures use `registry.example.com`, `ct 200/100`.
   other projects in this repo's files.
 - The rootfs is ephemeral (including Proxmox-created passwords/keys); `mpN:` mounts are
   never wiped and never rolled back — that is intended, document it rather than "fix" it.
+- Mountpoint targets **are** emptied after unpack (owner decision): on by default
+  (`--no-clean-mountpoints` / `PVE_AUTOUPDATE_CLEAN_MOUNTPOINTS=0` to disable), only on
+  containers that are actually being rewritten, all `mpN:` entries regardless of
+  `backup=0`/`dump=0`, missing targets are `mkdir -p`'d and chowned to the mapped root
+  uid (`100000` for `unprivileged: 1`), and it is reported in the log only — never as an
+  extra notification key.

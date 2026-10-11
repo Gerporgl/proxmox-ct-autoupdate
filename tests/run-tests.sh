@@ -59,6 +59,7 @@ teardown() {
     T=""
     unset MOCK_UMOCI_FAIL MOCK_PCT_STOP_FAIL MOCK_SKOPEO_COPY_FAIL MOCK_SKOPEO_INSPECT_FAIL MOCK_DIGEST
     unset MOCK_VERSION MOCK_CREATED MOCK_LABEL_CREATED MOCK_SOURCE MOCK_REVISION MOCK_SKOPEO_META_FAIL
+    unset MOCK_UMOCI_SYMLINK MOCK_UMOCI_SYMLINK_TARGET MOCK_STAT_OTHER REAL_STAT
 }
 
 zfs_add() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$MOCK_ZFS_DB"; mkdir -p "$3"; }
@@ -197,10 +198,27 @@ EOF
     pvesm_add local-zfs:subvol-100-disk-0 "$T/rpool/subvol-100-disk-0"
 }
 
+# conf with secondary volumes: mp= first, mp= last, and a backup=0 volume
+conf_with_mountpoints() {
+    conf_write 200 <<EOF
+#\`\`\`
+#AutoUpdate=registry
+#Image=registry.example.com/org/app%3Alatest
+#\`\`\`
+arch: amd64
+hostname: ctauto-demo
+mp0: local-zfs:subvol-200-disk-1,mp=/root,size=8G
+mp1: local-zfs:subvol-200-disk-2,backup=1,size=8G,mp=/data
+mp2: local-zfs:subvol-200-disk-3,size=8G,mp=/var/log,backup=0
+net0: name=eth0,bridge=vmbr0,ip=dhcp,type=veth
+rootfs: local-zfs:subvol-200-disk-0,size=16G
+unprivileged: 1
+EOF
+}
+
 # ----------------------------------------------------------------------------
 # Cases
 # ----------------------------------------------------------------------------
-
 case_dry_run() {
     test_start "dry-run performs no mutation but prints the commands"
     setup
@@ -705,6 +723,149 @@ case_list_reports_hostname_and_version() {
     teardown
 }
 
+case_mountpoint_cleanup_repairs_pve_invariant() {
+    test_start "mpN: mountpoint targets are emptied after unpack (PVE backup invariant)"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    run_script
+    check "exit 0"                 test "$RC" -eq 0
+    check "update applied"         test -f "$ROOTFS/.autoupdate-unpacked"
+    check "/root kept as a directory"        test -d "$ROOTFS/root"
+    check "shadowed /root/.profile removed"  bash -c "! test -e '$ROOTFS/root/.profile'"
+    check "shadowed /root/.cache removed"    bash -c "! test -e '$ROOTFS/root/.cache'"
+    check "file outside any mountpoint survives" test -f "$ROOTFS/etc/hosts"
+    check "/var/log target present"          test -d "$ROOTFS/var/log"
+    check "/data created empty"              bash -c "test -d '$ROOTFS/data' && [ -z \"\$(ls -A '$ROOTFS/data')\" ]"
+    check "no rollback"            rollback_count 0
+    check "digest stored"          test "$(digest_of 200)" = "$MOCK_DIGEST"
+    check "cleanup is not in the notification" notify_hasnt "Shadowed"
+    teardown
+}
+
+case_mountpoint_cleanup_second_run() {
+    test_start "mountpoint cleanup is idempotent on an already empty target"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    run_script
+    check "first run cleaned"      bash -c "! test -e '$ROOTFS/root/.profile'"
+    check "second run: still clean" bash -c "! test -e '$ROOTFS/root/.cache'"
+    teardown
+}
+
+case_mountpoint_cleanup_disabled() {
+    test_start "--no-clean-mountpoints leaves shadowed files alone"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    run_script --no-clean-mountpoints
+    check "update applied"                     test -f "$ROOTFS/.autoupdate-unpacked"
+    check "shadowed /root/.profile kept"       test -f "$ROOTFS/root/.profile"
+    check "no cleanup commands issued"         calls_hasnt "find $ROOTFS/root"
+    check "no /data created"                   bash -c "! test -e '$ROOTFS/data'"
+    teardown
+}
+
+case_no_mountpoints_no_cleanup() {
+    test_start "containers without mpN: entries get no cleanup pass"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; valid_block_conf
+    run_script
+    check "update applied"                     test -f "$ROOTFS/.autoupdate-unpacked"
+    check "image payload untouched"            test -f "$ROOTFS/root/.profile"
+    check "no cleanup commands issued"         calls_hasnt "find $ROOTFS/root"
+    teardown
+}
+
+case_mountpoint_unsafe_targets_refused() {
+    test_start "unsafe mountpoint targets (.., symlink, empty component) are refused"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS
+    conf_write 200 <<EOF
+#\`\`\`
+#AutoUpdate=registry
+#Image=registry.example.com/org/app%3Alatest
+#\`\`\`
+hostname: ctauto-demo
+mp0: local-zfs:subvol-200-disk-1,mp=/root/../etc,size=8G
+mp1: local-zfs:subvol-200-disk-2,mp=/var//log,size=8G
+mp2: local-zfs:subvol-200-disk-3,mp=/weird,size=8G
+rootfs: local-zfs:subvol-200-disk-0,size=16G
+unprivileged: 1
+EOF
+    MODERN_DS
+    export MOCK_UMOCI_SYMLINK=weird MOCK_UMOCI_SYMLINK_TARGET=etc
+    run_script
+    check "update still applied"               test -f "$ROOTFS/.autoupdate-unpacked"
+    check "etc/hosts survived the '..' target" test -f "$ROOTFS/etc/hosts"
+    check "symlink target left alone"          bash -c "test -L '$ROOTFS/weird' && test -f '$ROOTFS/etc/hosts'"
+    check "unsafe path refused"                grep -F -q "not a usable absolute path" "$ERR_FILE"
+    check "empty component refused"            grep -F -q "'/var//log' is not a usable" "$ERR_FILE"
+    check "nothing created for the bad target" bash -c "! test -e '$ROOTFS/var'"
+    check "symlink refused"                    grep -F -q "crosses a symlink" "$ERR_FILE"
+    check "no rollback for a refusal"          rollback_count 0
+    check "digest stored"                      test "$(digest_of 200)" = "$MOCK_DIGEST"
+    unset MOCK_UMOCI_SYMLINK MOCK_UMOCI_SYMLINK_TARGET
+    teardown
+}
+
+case_mountpoint_other_device_refused() {
+    test_start "a mountpoint target on another device is never cleaned"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    local p0=$PATH
+    export REAL_STAT=$(command -v stat)
+    mkdir -p "$T/bin"
+    cat > "$T/bin/stat" <<'EOF'
+#!/usr/bin/env bash
+# Fake stat(1): reports a foreign device for one chosen path.
+last="${@: -1}"
+if [[ -n ${MOCK_STAT_OTHER:-} && $last == "$MOCK_STAT_OTHER" ]]; then printf '4242\n'; exit 0; fi
+exec "$REAL_STAT" "$@"
+EOF
+    chmod +x "$T/bin/stat"
+    export MOCK_STAT_OTHER=$ROOTFS/root PATH="$T/bin:$PATH"
+    run_script
+    PATH=$p0
+    check "refusal is logged"                  grep -F -q "on another device than the rootfs" "$ERR_FILE"
+    check "shadowed files left alone"          test -f "$ROOTFS/root/.profile"
+    check "other targets still handled"        test -d "$ROOTFS/data"
+    check "update still applied"               test -f "$ROOTFS/.autoupdate-unpacked"
+    check "no rollback for a refusal"          rollback_count 0
+    unset MOCK_STAT_OTHER REAL_STAT
+    teardown
+}
+
+case_mountpoint_cleanup_dry_run() {
+    test_start "--dry-run plans the mountpoint cleanup without doing it"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    mkdir -p "$ROOTFS/root"
+    printf 'old\n' > "$ROOTFS/root/.bashrc"
+    run_script --dry-run
+    check "plans the cleanup"     grep -F -q "[dry-run] find $ROOTFS/root -xdev -mindepth 1 -delete" "$OUT_FILE"
+    check "plans creating /data"  grep -F -q "[dry-run] mkdir -p $ROOTFS/data" "$OUT_FILE"
+    check "rootfs /root untouched" test -f "$ROOTFS/root/.bashrc"
+    check "nothing created"       bash -c "! test -e '$ROOTFS/data'"
+    teardown
+}
+
+case_list_reports_mountpoints() {
+    test_start "--list reports the parsed mountpoint targets"
+    setup
+    ROOTFS=$T/rpool/subvol-200-disk-0
+    STORAGE_ZFS; MODERN_DS; conf_with_mountpoints
+    run_script --list
+    check "reports /root"    grep -F -q "mountpoints=/root /data /var/log clean=1" "$OUT_FILE"
+    check "no mutation"      calls_hasnt "skopeo copy"
+    teardown
+}
+
 # ----------------------------------------------------------------------------
 
 for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
@@ -716,7 +877,12 @@ for fn in case_dry_run case_update_success case_digest_unchanged case_no_block \
           case_ctid_filter case_privileged_no_map case_log_timestamps \
           case_notification_metadata case_notification_version_change \
           case_notification_without_hostname case_notification_without_metadata \
-          case_skopeo_metadata_fallback case_list_reports_hostname_and_version; do
+          case_skopeo_metadata_fallback case_list_reports_hostname_and_version \
+          case_mountpoint_cleanup_repairs_pve_invariant case_mountpoint_cleanup_second_run \
+          case_mountpoint_cleanup_disabled case_no_mountpoints_no_cleanup \
+          case_mountpoint_unsafe_targets_refused case_mountpoint_other_device_refused \
+          case_mountpoint_cleanup_dry_run \
+          case_list_reports_mountpoints; do
     MOCK_DIGEST_DEFAULT=sha256:aaaa1111
     "$fn"
 done

@@ -109,8 +109,10 @@ A container whose block is missing or malformed is never touched.
 4. `zfs snapshot <dataset>@autoupdate-<timestamp>`
 5. `find <rootfs> -xdev -mindepth 1 -delete` (extra `mpN:` mounts are not crossed)
 6. `umoci raw unpack` (uid/gid map `0:100000:65536` for `unprivileged: 1`)
-7. `pct start` if it was running, then a status sanity check
-8. store the new digest and metadata, prune snapshots, clean the staging dir
+7. empty the rootfs directories that `mpN:` mounts are bound over (see
+   *`mpN:` mounts and backups* below; disable with `--no-clean-mountpoints`)
+8. `pct start` if it was running, then a status sanity check
+9. store the new digest and metadata, prune snapshots, clean the staging dir
 
 **Rollback:** any failure at or after the wipe triggers `zfs rollback -f` on the
 snapshot, restarts the container if it had been running, sends an error notification,
@@ -135,6 +137,36 @@ The path is never assumed. Proxmox has moved ZFS subvol layouts between versions
 Containers whose dataset does not exist on this node (cluster configs are global)
 are skipped quietly.
 
+## `mpN:` mounts and Proxmox backups
+
+Proxmox refuses to bind a secondary volume over a **non-empty** directory in the
+rootfs, and `vzdump` relies on that invariant. A base image ships its own
+`/root/.bashrc`, `/root/.profile`, `/root/.cache/…`, so unpacking it re-creates
+files inside a directory that `mp0: …,mp=/root` covers — and the next backup then
+fails on the shadowed files.
+
+So right after unpacking, while the container is still stopped (the `mpN:` volumes
+are *not* mounted at that moment), every `mp=` target parsed from the container
+config is emptied again — the directory itself is kept, only what the image put
+inside it is deleted, and a target the image does not ship is created empty and
+chowned to the container's root:
+
+```
+[info ] ct 100: emptying '/root' — files there are shadowed by the mount anyway
+[info ] ct 100: creating empty mountpoint target '/data' (absent from the image)
+```
+
+Why this cannot hurt the secondary volumes: the script never resolves an `mpN:`
+source volume, it only ever names `<rootfs dataset mountpoint>/<target>`, and it
+refuses (warn, no rollback) a target that is a mount point, lives on a different
+device than the rootfs, or whose path crosses a symlink inside the rootfs. Only
+files the image just shipped are removed — everything under a mountpoint target is
+hidden by the bind mount for the container's whole lifetime anyway.
+
+The cleanup runs **only on containers that are actually rewritten**. A container
+that is up to date keeps whatever it has; to repair one, re-apply the update with
+`--ctid <id> --force` (that is a normal, snapshot-guarded rewrite).
+
 ## Options
 
 ```
@@ -143,6 +175,9 @@ are skipped quietly.
                      and last applied digest/version, no changes
 --ctid <id>        limit the run to this CTID (repeatable)
 --force            apply the update even when the digest did not change
+--no-clean-mountpoints
+                   leave the files an mpN: mount shadows inside the rootfs alone
+                   (on by default, see "mpN: mounts and Proxmox backups")
 --verbose          debug logging
 --log-timestamps   prefix every log line with a date/time (off by default)
 --state-dir DIR    default /var/lib/pve-ct-autoupdate
@@ -164,6 +199,7 @@ Environment overrides:
 | `PVE_AUTOUPDATE_SNAPSHOT_KEEP` | `0` |
 | `PVE_AUTOUPDATE_SNAPSHOT_PREFIX` | `autoupdate` (ZFS snapshot names are limited to 32 chars) |
 | `PVE_AUTOUPDATE_IDMAP` | `0:100000:65536` |
+| `PVE_AUTOUPDATE_CLEAN_MOUNTPOINTS` | `1` — empty `mpN:` mountpoint targets after unpack |
 | `PVE_AUTOUPDATE_NOTIFY_CMD` | auto-detected hook (see below) |
 | `PVE_AUTOUPDATE_VERBOSE`, `PVE_AUTOUPDATE_LOG_TIMESTAMPS`, `PVE_AUTOUPDATE_DRY_RUN` | `0` |
 
@@ -238,11 +274,15 @@ Self-contained, no Proxmox/ZFS/registry needed — `tests/mockbin/` provides fak
 
 Covers: digest unchanged, opt-in parsing (missing/unterminated/invalid block,
 missing tag, unknown keys), non-ZFS storage, modern *and* legacy ZFS layouts,
-mountpoint mismatch, foreign cluster nodes, stopped containers, pull failure
-(no rollback, keeps going), unpack failure (rollback + abort), snapshot pruning
-with `SnapshotKeep`, privileged vs unprivileged id mapping, `--dry-run` and
-`--list`, notification content (hostname, version/digest diffs, label-less images,
-skopeo metadata fallback).
+mountpoint mismatch, `mpN:` mountpoint cleanup (shadowed files removed, target
+directory kept and created, unsafe/symlinked/foreign-device targets refused,
+`--no-clean-mountpoints`, `--list` reporting), foreign cluster nodes, stopped
+containers, pull failure (no rollback, keeps going), unpack failure (rollback +
+abort), snapshot pruning with `SnapshotKeep`, privileged vs unprivileged id
+mapping, `--dry-run` and `--list`, notification content (hostname, version/digest
+diffs, label-less images, skopeo metadata fallback). The fake `umoci` plants an
+image payload (`/root/.profile`, `/root/.cache/`, `/etc/hosts`) so the cleanup has
+something realistic to remove.
 
 ## Limitations
 
@@ -260,7 +300,9 @@ skopeo metadata fallback).
   Prefer images that re-create their own defaults when the mounted directory is empty,
   so the container is usable again right after an update.
 - Snapshot-based rollback only covers the rootfs dataset: extra `mpN:` mounts are
-  deliberately never touched, so data there is **not** rolled back.
+  deliberately never touched, so data there is **not** rolled back. The mountpoint
+  cleanup walks the *rootfs* side of a mount only; it refuses any target that is a
+  mount point, lives on another device, or crosses a rootfs symlink.
 - Registry authentication uses whatever `skopeo auth.json` provides; there is no
   built-in credential handling and no TLS-verify bypass switch.
 - Image refs must carry a tag; `@sha256:` pinned refs are not accepted (the digest
